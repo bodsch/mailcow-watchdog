@@ -1,5 +1,10 @@
 # Forgejo Actions CI — runs on every push to main and every pull request.
 #
+# Every step is a `make` target, so the same checks run locally and here.
+#
+# This file is shared with the sibling repository and is identical in both — see
+# CONVENTIONS.md.
+#
 # Prerequisites on the Forgejo instance:
 #   - Actions enabled for the repo (Settings → Actions).
 #   - A registered runner whose labels include `ubuntu-latest` (adjust `runs-on`
@@ -27,16 +32,10 @@ jobs:
           cache: true
 
       - name: gofmt
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "Not gofmt-clean:"; echo "$unformatted"
-            echo "Run 'make fmt'."
-            exit 1
-          fi
+        run: make fmt
 
       - name: go vet
-        run: go vet ./...
+        run: make vet
 
       - name: golangci-lint (incl. gosec)
         run: |
@@ -47,10 +46,7 @@ jobs:
         run: make vuln
 
       - name: Test (race detector)
-        run: go test -race -count=1 ./...
+        run: make test
 
       - name: Build
         run: make build
-
-      - name: Build bench module
-        run: cd bench && go build ./...

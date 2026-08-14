@@ -44,14 +44,15 @@ const (
 	CertThreshold = 7
 )
 
-// defaultMetricsListen is where the observability endpoint binds.
+// DefaultObsListen is where the observability endpoint binds.
 //
 // It sits deliberately outside 9100-9999: that range is the Prometheus project's
 // exporter registry and is fully allocated — 9099 itself belongs to the SQL
 // exporter. The wiki's advice for an application's own exporter is to stay out of
 // the registry, and 9393 also avoids every port mailcow uses internally (8081,
-// 8642, 9000-9002, 9900, 10001, 10055, 11332-11334, 20000).
-const defaultMetricsListen = ":9393"
+// 8642, 9000-9002, 9900, 10001, 10055, 11332-11334, 20000). The dockerapi serves
+// the same three endpoints one port up, on 9394.
+const DefaultObsListen = ":9393"
 
 // Config is the fully resolved runtime configuration.
 type Config struct {
@@ -74,7 +75,7 @@ type Config struct {
 	Notify   Notify
 	Checks   Checks
 	Log      Log
-	Metrics  Metrics
+	Obs      Obs
 	MailqDir string
 }
 
@@ -142,9 +143,9 @@ type Log struct {
 	Format string // LOG_FORMAT: json|text
 }
 
-// Metrics configures the observability endpoint serving /metrics, /healthz and
+// Obs configures the observability endpoint serving /metrics, /healthz and
 // /readyz. An empty Listen disables the server entirely.
-type Metrics struct {
+type Obs struct {
 	Listen string // WATCHDOG_METRICS_LISTEN, e.g. ":9393"
 }
 
