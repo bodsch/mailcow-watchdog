@@ -1,6 +1,9 @@
 # Forgejo Actions release — on a version tag (v*), cross-compiles the static
 # binaries and publishes them (with checksums) as release assets.
 #
+# This file is shared with the sibling repository and is identical in both — see
+# CONVENTIONS.md.
+#
 # Prerequisites (in addition to the CI ones):
 #   - The forgejo-release action reachable at code.forgejo.org.
 #   - The automatic ${{ secrets.GITHUB_TOKEN }} has package/release write scope
@@ -26,11 +29,13 @@ jobs:
 
       - name: Build release binaries
         # VERSION comes from the tag (e.g. v0.2.0) so the embedded build info is
-        # correct; Commit/BuildDate default from git/date in the Makefile.
+        # correct.
         run: make release VERSION="${{ github.ref_name }}"
 
       - name: Checksums
-        run: cd bin && sha256sum watchdog > SHA256SUMS
+        # The binaries land in dist/, one per platform; the checksum file joins
+        # them there so it is uploaded with the same release-dir.
+        run: cd dist && sha256sum * > SHA256SUMS
 
       - name: Publish release
         uses: https://code.forgejo.org/actions/forgejo-release@v2

@@ -1,7 +1,8 @@
 # mailcow-watchdog Makefile
 #
 # All build/test/quality logic lives here so CI configs stay thin wrappers that
-# only invoke `make` targets.
+# only invoke `make` targets. The target set is shared with mailcow-dockerapi —
+# see CONVENTIONS.md.
 
 BINARY      := watchdog
 CMD_PKG     := ./cmd/watchdog/
@@ -29,7 +30,7 @@ GOLANGCI   := golangci-lint
 .PHONY: help
 help: ## Show this help.
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
 build: ## Build the watchdog binary into bin/.
@@ -45,13 +46,10 @@ cover: ## Run tests and write a coverage profile.
 	$(GO) test -race -count=1 -coverprofile=coverage.out ./...
 	$(GO) tool cover -func=coverage.out | tail -n 1
 
-.PHONY: bench
-bench: ## Run micro-benchmarks (no tests) with allocation stats.
-	$(GO) test -run '^$$' -bench . -benchmem ./...
-
 .PHONY: fmt
-fmt: ## Format all Go source.
-	$(GO) fmt ./...
+fmt: ## Fail if anything is not gofmt-clean.
+	@out="$$(gofmt -l cmd internal)"; \
+	if [ -n "$$out" ]; then echo "not gofmt-clean:"; echo "$$out"; echo "run 'gofmt -w cmd internal'."; exit 1; fi
 
 .PHONY: vet
 vet: ## Run go vet.
