@@ -239,4 +239,6 @@ metrics:
 - `internal/obs/obs.go` and `internal/obs/obs_test.go` — byte-identical
 - `.golangci.yml`
 - `.forgejo/workflows/ci.yml`, `.forgejo/workflows/release.yml`
-- the `Makefile` target set, its help mechanism and its flags
+- the `Makefile` below its variable block — the four lines above
+  `# --- shared from here on` (the binary, its package and the image name) and the
+  service-specific targets at the very bottom are the only parts that differ
