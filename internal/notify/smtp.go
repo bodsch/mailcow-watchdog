@@ -171,10 +171,14 @@ func (s *SMTPSender) deliverTo(ctx context.Context, host, rcpt string, body []by
 	}
 	defer conn.Close()
 
+	// The deadline is wall-clock time as the kernel sees it, so it comes from
+	// time.Now rather than from s.now: the injectable clock stamps the Date header
+	// and is pinned to a fixed instant in tests, which would put the deadline in
+	// the past and fail every transaction.
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	} else {
-		_ = conn.SetDeadline(s.now().Add(smtpTimeout))
+		_ = conn.SetDeadline(time.Now().Add(smtpTimeout))
 	}
 
 	client, err := smtp.NewClient(conn, host)
