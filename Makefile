@@ -21,7 +21,8 @@ VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev
 
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-# Static binaries: the runtime image is distroless, there is nothing to link against.
+# Static binaries: the runtime image is distroless, there is nothing to link
+# against. The race detector is the exception — see the test target.
 export CGO_ENABLED := 0
 
 # The container only ever runs on Linux; the others are for local development.
@@ -42,18 +43,23 @@ build: ## Build the binary into bin/.
 	@mkdir -p $(BIN_DIR)
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o $(BIN_DIR)/$(BINARY) $(CMD_PKG)
 
+# The race detector requires cgo and a C compiler on every platform except
+# darwin, where it also links without one. Overriding CGO_ENABLED here rather
+# than dropping the export above keeps the binaries static while letting the
+# tests run: without it, `go test -race` fails on Linux with
+# "-race requires cgo; enable cgo by setting CGO_ENABLED=1".
 .PHONY: test
-test: ## Run the test suite with the race detector.
-	$(GO) test -race -count=1 ./...
+test: ## Run the test suite with the race detector (needs a C compiler).
+	CGO_ENABLED=1 $(GO) test -race -count=1 ./...
 
 .PHONY: cover
 cover: ## Run tests and write a coverage profile.
-	$(GO) test -race -count=1 -coverprofile=coverage.out ./...
+	CGO_ENABLED=1 $(GO) test -race -count=1 -coverprofile=coverage.out ./...
 	$(GO) tool cover -func=coverage.out | tail -n 1
 
 .PHONY: bench
 bench: ## Run micro-benchmarks (no tests) with allocation stats.
-	$(GO) test -run '^$$' -bench . -benchmem ./...
+	CGO_ENABLED=1 $(GO) test -run '^$$' -bench . -benchmem ./...
 
 .PHONY: fmt
 fmt: ## Fail if anything is not gofmt-clean.
