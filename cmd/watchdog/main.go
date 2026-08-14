@@ -22,6 +22,7 @@ import (
 	"bodsch.me/mailcow-watchdog/internal/dockerapi"
 	"bodsch.me/mailcow-watchdog/internal/metrics"
 	"bodsch.me/mailcow-watchdog/internal/notify"
+	"bodsch.me/mailcow-watchdog/internal/probe"
 	"bodsch.me/mailcow-watchdog/internal/store"
 	"bodsch.me/mailcow-watchdog/internal/supervisor"
 	"bodsch.me/mailcow-watchdog/internal/whois"
@@ -55,7 +56,12 @@ func run() error {
 
 	log := newLogger(cfg.Log)
 	slog.SetDefault(log)
-	log.Info("mailcow watchdog starting", "version", version, "hostname", cfg.Mailcow.Hostname)
+	log.Info("mailcow watchdog starting",
+		"version", version,
+		"hostname", cfg.Mailcow.Hostname,
+		"project", cfg.Mailcow.ComposeProject,
+		"log_level", cfg.Log.Level,
+		"verbose", cfg.Verbose)
 
 	// Signals arrive here rather than in a goroutine so every stage of startup
 	// can be interrupted cleanly.
@@ -100,6 +106,8 @@ func run() error {
 		return err
 	}
 
+	checkIPv6(ctx, cfg, deps.dispatcher, log)
+
 	if cfg.Notify.OnStart {
 		announceStart(ctx, deps.dispatcher, m, log)
 	}
@@ -114,6 +122,7 @@ func run() error {
 // dependencies are the connections the checks share.
 type dependencies struct {
 	store      store.Store
+	localStore probe.RedisPinger
 	appDB      *sql.DB
 	rootDB     *sql.DB
 	docker     *dockerapi.Client
@@ -155,6 +164,20 @@ func connect(ctx context.Context, cfg *config.Config, log *slog.Logger) (*depend
 
 	redis := store.New(store.Options{Addr: cfg.Redis.Addr, Password: cfg.Redis.Password})
 	closers = append(closers, func() { _ = redis.Close() })
+
+	// Under REDIS_SLAVEOF the writes above go to the replication primary, but
+	// the redis check's event restarts the local container — so that check needs
+	// a handle on the local instance or it would measure the wrong machine.
+	localRedis := redis
+	if cfg.Redis.Addr != cfg.Redis.LocalAddr {
+		localRedis = store.New(store.Options{
+			Addr:     cfg.Redis.LocalAddr,
+			Password: cfg.Redis.Password,
+		})
+		closers = append(closers, func() { _ = localRedis.Close() })
+		log.Info("redis runs in replication",
+			"primary", cfg.Redis.Addr, "local", cfg.Redis.LocalAddr)
+	}
 
 	// The checks would all fail identically until these are up, so the startup
 	// waits rather than reporting a stack-wide outage that is really just a cold
@@ -207,6 +230,7 @@ func connect(ctx context.Context, cfg *config.Config, log *slog.Logger) (*depend
 
 	return &dependencies{
 		store:      redis,
+		localStore: localRedis,
 		appDB:      appDB,
 		rootDB:     rootDB,
 		docker:     docker,
@@ -223,11 +247,12 @@ func build(cfg *config.Config, deps *dependencies, m *metrics.Metrics, log *slog
 	log.Info("resolving container addresses", "via", resolverName(cfg.Docker.UseAPI))
 
 	checks, err := check.Build(check.Deps{
-		Config:   cfg,
-		Resolver: resolver,
-		Store:    deps.store,
-		AppDB:    deps.appDB,
-		RootDB:   deps.rootDB,
+		Config:     cfg,
+		Resolver:   resolver,
+		Store:      deps.store,
+		LocalStore: deps.localStore,
+		AppDB:      deps.appDB,
+		RootDB:     deps.rootDB,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("building the checks: %w", err)
@@ -297,6 +322,45 @@ func waitFor(ctx context.Context, log *slog.Logger, what string, probe func(cont
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+	}
+}
+
+// checkIPv6 verifies once, at startup, that a bridge configured for IPv6 also
+// has a working route out.
+//
+// mailcow's docker-compose can enable IPv6 on the network. When it is enabled
+// but the host cannot actually reach the v6 internet, delivery to v6-only
+// exchangers fails in a way that is very hard to attribute weeks later. The
+// shell checked this once for the same reason; it is not a recurring check.
+func checkIPv6(ctx context.Context, cfg *config.Config, dispatcher *notify.Dispatcher, log *slog.Logger) {
+	configured, err := probe.IPv6Configured(cfg.Mailcow.IPv6Network, probe.LocalAddrs)
+	if err != nil {
+		log.Warn("cannot determine whether IPv6 is configured", "err", err)
+		return
+	}
+	if !configured {
+		log.Debug("no local address in the configured IPv6 network, skipping the link check",
+			"network", cfg.Mailcow.IPv6Network)
+		return
+	}
+
+	if address := probe.NewIPv6Link(probe.IPv6Options{}).Address(ctx); address != "" {
+		log.Info("IPv6 link is up", "address", address)
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+
+	const message = "enable_ipv6 is true in docker-compose.yml, but an IPv6 link " +
+		"could not be established. Please verify your IPv6 connection."
+
+	log.Error("IPv6 is enabled on the bridge but no link could be established")
+	if dispatcher == nil {
+		return
+	}
+	if err := dispatcher.Dispatch(ctx, notify.Alert{Service: "ipv6-config", Message: message}); err != nil {
+		log.Error("cannot send the IPv6 notification", "err", err)
 	}
 }
 

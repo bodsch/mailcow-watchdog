@@ -214,6 +214,33 @@ func TestDevModeMapsToDebugLogging(t *testing.T) {
 	}
 }
 
+// WATCHDOG_VERBOSE was `set -xv` plus the verbose flags of smtp-cli and curl.
+// Here it means debug logging: every probe transcript goes to the log rather
+// than only into a notification body.
+func TestVerboseRaisesTheLogLevel(t *testing.T) {
+	cfg := loadWith(t, map[string]string{"WATCHDOG_VERBOSE": "y"})
+	if !cfg.Verbose {
+		t.Error("Verbose = false for WATCHDOG_VERBOSE=y")
+	}
+	if cfg.Log.Level != "debug" {
+		t.Errorf("Log.Level = %q, want debug", cfg.Log.Level)
+	}
+	// Verbose says nothing about the output format, unlike DEV_MODE.
+	if cfg.Log.Format != "json" {
+		t.Errorf("Log.Format = %q, want json", cfg.Log.Format)
+	}
+
+	cfg = loadWith(t, map[string]string{"WATCHDOG_VERBOSE": "n"})
+	if cfg.Verbose || cfg.Log.Level != "info" {
+		t.Errorf("WATCHDOG_VERBOSE=n: verbose = %v, level = %q", cfg.Verbose, cfg.Log.Level)
+	}
+
+	cfg = loadWith(t, map[string]string{"WATCHDOG_VERBOSE": "y", "LOG_LEVEL": "error"})
+	if cfg.Log.Level != "error" {
+		t.Errorf("explicit LOG_LEVEL should win, got %q", cfg.Log.Level)
+	}
+}
+
 func TestDSN(t *testing.T) {
 	cfg := loadWith(t, map[string]string{"DBROOT": "rootpw"})
 

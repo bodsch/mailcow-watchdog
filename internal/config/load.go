@@ -52,7 +52,7 @@ func Load(look Lookup) (*Config, error) {
 	cfg.Docker = loadDocker(&e, cfg.Mailcow.ComposeProject)
 	cfg.Notify = loadNotify(&e, cfg.Mailcow.Hostname)
 	cfg.Checks = loadChecks(&e)
-	cfg.Log = loadLog(&e)
+	cfg.Log = loadLog(&e, cfg.Verbose)
 	cfg.Metrics = Metrics{Listen: e.str("WATCHDOG_METRICS_LISTEN", defaultMetricsListen)}
 
 	if err := e.err(); err != nil {
@@ -142,16 +142,25 @@ func loadChecks(e *env) Checks {
 	}
 }
 
-// loadLog maps DEV_MODE onto the log level. watchdog.sh enabled `set -x` unless
-// DEV_MODE was exactly "n"; the structured equivalent is debug logging. An
-// explicit LOG_LEVEL always wins.
-func loadLog(e *env) Log {
+// loadLog maps DEV_MODE and WATCHDOG_VERBOSE onto the log level.
+//
+// watchdog.sh enabled `set -x` unless DEV_MODE was exactly "n", and
+// WATCHDOG_VERBOSE additionally turned on `set -xv` plus the verbose flags of
+// smtp-cli and curl. Both amount to "show me what the probes are actually
+// doing", which here is debug logging: it puts every probe's transcript in the
+// log instead of only in a notification body. An explicit LOG_LEVEL still wins.
+func loadLog(e *env, verbose bool) Log {
 	level := "info"
 	format := "json"
+
 	if !isNo(e.str("DEV_MODE", "n")) {
 		level = "debug"
 		format = "text"
 	}
+	if verbose {
+		level = "debug"
+	}
+
 	return Log{
 		Level:  strings.ToLower(e.str("LOG_LEVEL", level)),
 		Format: strings.ToLower(e.str("LOG_FORMAT", format)),

@@ -61,8 +61,15 @@ type Deps struct {
 	Config *config.Config
 	// Resolver maps compose service names to addresses.
 	Resolver Resolver
-	// Store is the Redis the state-watching checks read from.
+	// Store is the Redis the state-watching checks read from. Under
+	// REDIS_SLAVEOF that is the replication primary, because the local instance
+	// is read-only.
 	Store store.Store
+	// LocalStore is the container-local Redis. The redis check probes this one
+	// even when everything else talks to a primary elsewhere: its event restarts
+	// redis-mailcow, so it has to be the health of that container it measures.
+	// When nil, Store is used.
+	LocalStore probe.RedisPinger
 	// AppDB is connected as the mailcow application user.
 	AppDB *sql.DB
 	// RootDB is connected as root and is only needed for replication status.
@@ -80,6 +87,12 @@ func Build(deps Deps) ([]*Check, error) {
 
 	cfg := deps.Config
 	at := deps.Resolver.Addr
+
+	// Without a replication setup both point at the same instance anyway.
+	localRedis := deps.LocalStore
+	if localRedis == nil {
+		localRedis = deps.Store
+	}
 
 	// The order is the order watchdog.sh spawned its agents in, which keeps
 	// startup logs comparable between the two implementations.
@@ -119,7 +132,7 @@ func Build(deps Deps) ([]*Check, error) {
 			Threshold: cfg.Checks.Redis.Threshold,
 			Interval:  standardInterval, DeadDelay: time.Second,
 			Probes: []probe.Probe{
-				probe.NewRedisPing("ping", deps.Store),
+				probe.NewRedisPing("ping", localRedis),
 			},
 		},
 		{
