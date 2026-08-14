@@ -10,70 +10,52 @@ import (
 	"time"
 
 	"bodsch.me/mailcow-watchdog/internal/config"
+	"bodsch.me/mailcow-watchdog/internal/logging"
 )
 
-func TestNewLogger(t *testing.T) {
+// config.Log and logging.Options are converted into one another, which only
+// compiles while the two structs agree. This test pins the behaviour that
+// conversion is supposed to carry: DEV_MODE's text output and the container
+// default's JSON both arrive at the handler.
+func TestLoggerIsBuiltFromTheConfig(t *testing.T) {
 	tests := []struct {
-		name     string
-		cfg      config.Log
-		level    slog.Level
-		enabled  bool
-		contains string
+		name  string
+		cfg   config.Log
+		wants string
 	}{
-		{
-			name:     "json at info",
-			cfg:      config.Log{Level: "info", Format: "json"},
-			level:    slog.LevelInfo,
-			enabled:  true,
-			contains: `"msg"`,
-		},
-		{
-			name:    "debug is filtered out at info",
-			cfg:     config.Log{Level: "info", Format: "json"},
-			level:   slog.LevelDebug,
-			enabled: false,
-		},
-		{
-			name:     "text at debug",
-			cfg:      config.Log{Level: "debug", Format: "text"},
-			level:    slog.LevelDebug,
-			enabled:  true,
-			contains: "msg=",
-		},
-		{
-			name:    "error only",
-			cfg:     config.Log{Level: "error", Format: "json"},
-			level:   slog.LevelWarn,
-			enabled: false,
-		},
+		{"the container default", config.Log{Level: "info", Format: "json"}, `"msg":"hello"`},
+		{"DEV_MODE", config.Log{Level: "debug", Format: "text"}, "msg=hello"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			log := newLogger(tc.cfg)
-			if got := log.Enabled(context.Background(), tc.level); got != tc.enabled {
-				t.Errorf("Enabled(%v) = %v, want %v", tc.level, got, tc.enabled)
+			var buf bytes.Buffer
+			logging.New(&buf, logging.Options(tc.cfg)).Info("hello")
+
+			if !strings.Contains(buf.String(), tc.wants) {
+				t.Errorf("output %q does not contain %q", buf.String(), tc.wants)
 			}
 		})
 	}
+
+	// The level has to travel too, or DEV_MODE would be quiet.
+	var buf bytes.Buffer
+	log := logging.New(&buf, logging.Options(config.Log{Level: "error", Format: "json"}))
+	if log.Enabled(context.Background(), slog.LevelWarn) {
+		t.Error("a warning should be filtered out at level error")
+	}
 }
 
-// The format has to be selectable because DEV_MODE turns on human-readable
-// output while the container default is machine-readable.
-func TestLoggerFormat(t *testing.T) {
-	var buf bytes.Buffer
+// A failed listener has to reach run's caller rather than being lost in the
+// goroutine that serves it.
+func TestWaitForObsReportsTheServerError(t *testing.T) {
+	failed := errors.New("serving metrics on :9393: address in use")
 
-	json := slog.New(slog.NewJSONHandler(&buf, nil))
-	json.Info("hello", "key", "value")
-	if !strings.Contains(buf.String(), `"key":"value"`) {
-		t.Errorf("JSON handler produced %q", buf.String())
-	}
+	done := make(chan error, 1)
+	done <- failed
 
-	buf.Reset()
-	text := slog.New(slog.NewTextHandler(&buf, nil))
-	text.Info("hello", "key", "value")
-	if !strings.Contains(buf.String(), "key=value") {
-		t.Errorf("text handler produced %q", buf.String())
+	if err := waitForObs(done); !errors.Is(err, failed) {
+		t.Errorf("waitForObs = %v, want %v", err, failed)
 	}
 }
 

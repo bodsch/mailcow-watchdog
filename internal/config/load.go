@@ -53,7 +53,7 @@ func Load(look Lookup) (*Config, error) {
 	cfg.Notify = loadNotify(&e, cfg.Mailcow.Hostname)
 	cfg.Checks = loadChecks(&e)
 	cfg.Log = loadLog(&e, cfg.Verbose)
-	cfg.Metrics = Metrics{Listen: e.str("WATCHDOG_METRICS_LISTEN", defaultMetricsListen)}
+	cfg.Obs = Obs{Listen: e.str("WATCHDOG_METRICS_LISTEN", DefaultObsListen)}
 
 	if err := e.err(); err != nil {
 		return nil, err

@@ -20,8 +20,10 @@ import (
 	"bodsch.me/mailcow-watchdog/internal/check"
 	"bodsch.me/mailcow-watchdog/internal/config"
 	"bodsch.me/mailcow-watchdog/internal/dockerapi"
+	"bodsch.me/mailcow-watchdog/internal/logging"
 	"bodsch.me/mailcow-watchdog/internal/metrics"
 	"bodsch.me/mailcow-watchdog/internal/notify"
+	"bodsch.me/mailcow-watchdog/internal/obs"
 	"bodsch.me/mailcow-watchdog/internal/probe"
 	"bodsch.me/mailcow-watchdog/internal/store"
 	"bodsch.me/mailcow-watchdog/internal/supervisor"
@@ -39,6 +41,9 @@ var version = "dev"
 // used two seconds.
 const dependencyPoll = 2 * time.Second
 
+// obsShutdownTimeout bounds the wait for the observability server to stop.
+const obsShutdownTimeout = 10 * time.Second
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("watchdog failed", "err", err)
@@ -54,7 +59,7 @@ func run() error {
 		return err
 	}
 
-	log := newLogger(cfg.Log)
+	log := logging.New(os.Stdout, logging.Options(cfg.Log))
 	slog.SetDefault(log)
 	log.Info("mailcow watchdog starting",
 		"version", version,
@@ -75,11 +80,16 @@ func run() error {
 	)
 	m := metrics.New(registry, version)
 
-	readiness := &metrics.Readiness{}
-	metricsServer := metrics.NewServer(cfg.Metrics.Listen, registry, readiness, log)
+	readiness := &obs.Readiness{}
+	obsServer := obs.New(obs.Options{
+		Listen:    cfg.Obs.Listen,
+		Gatherer:  registry,
+		Readiness: readiness,
+		Log:       log,
+	})
 
-	metricsDone := make(chan error, 1)
-	go func() { metricsDone <- metricsServer.Run(ctx) }()
+	obsDone := make(chan error, 1)
+	go func() { obsDone <- obsServer.Run(ctx) }()
 
 	if !cfg.Enabled {
 		// USE_WATCHDOG=n. Idling rather than exiting keeps docker-compose from
@@ -88,11 +98,11 @@ func run() error {
 		log.Warn("USE_WATCHDOG is disabled, monitoring nothing")
 		readiness.SetReady(true)
 		<-ctx.Done()
-		return waitForMetrics(metricsDone)
+		return waitForObs(obsDone)
 	}
 
 	if err := settle(ctx, cfg.SettleDelay, log); err != nil {
-		return waitForMetrics(metricsDone)
+		return waitForObs(obsDone)
 	}
 
 	deps, cleanup, err := connect(ctx, cfg, log)
@@ -116,7 +126,7 @@ func run() error {
 	if err := sup.Run(ctx); err != nil {
 		return err
 	}
-	return waitForMetrics(metricsDone)
+	return waitForObs(obsDone)
 }
 
 // dependencies are the connections the checks share.
@@ -382,25 +392,6 @@ func announceStart(ctx context.Context, dispatcher *notify.Dispatcher, m *metric
 	m.ObserveNotification("sent")
 }
 
-// newLogger builds the structured logger.
-func newLogger(cfg config.Log) *slog.Logger {
-	level := slog.LevelInfo
-	switch cfg.Level {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	}
-
-	opts := &slog.HandlerOptions{Level: level}
-	if cfg.Format == "text" {
-		return slog.New(slog.NewTextHandler(os.Stdout, opts))
-	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, opts))
-}
-
 func resolverName(useAPI bool) string {
 	if useAPI {
 		return "dockerapi"
@@ -408,11 +399,13 @@ func resolverName(useAPI bool) string {
 	return "dns"
 }
 
-func waitForMetrics(done chan error) error {
+// waitForObs collects the observability server's exit status, so a failed
+// listener is reported rather than lost in a goroutine.
+func waitForObs(done chan error) error {
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(10 * time.Second):
-		return errors.New("the metrics server did not shut down")
+	case <-time.After(obsShutdownTimeout):
+		return errors.New("the observability server did not shut down")
 	}
 }

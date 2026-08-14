@@ -1,4 +1,9 @@
-package metrics
+// Package obs serves the observability endpoints: /metrics, /healthz and
+// /readyz.
+//
+// This package is shared with mailcow-watchdog and is identical in both
+// repositories. Keep both copies in sync — see CONVENTIONS.md.
+package obs
 
 import (
 	"context"
@@ -16,47 +21,67 @@ import (
 // shutdownGrace bounds how long the server waits for in-flight scrapes.
 const shutdownGrace = 5 * time.Second
 
-// Readiness tracks whether the watchdog has finished starting up.
+// Readiness tracks whether the service has finished starting up.
 //
-// The watchdog waits for MariaDB and Redis before it probes anything, which can
-// take a while on a cold stack. /readyz stays negative until then so an
-// orchestrator does not mistake "still waiting for the database" for "healthy".
+// A service usually waits for Redis, a database or the Docker daemon before it
+// can do its job, which can take a while on a cold stack. /readyz stays negative
+// until then, so an orchestrator does not mistake "still connecting" for
+// "healthy".
 type Readiness struct {
 	ready atomic.Bool
 }
 
-// SetReady marks the watchdog as ready to serve.
+// SetReady marks the service as ready to serve.
 func (r *Readiness) SetReady(ready bool) { r.ready.Store(ready) }
 
 // Ready reports the current state.
 func (r *Readiness) Ready() bool { return r.ready.Load() }
 
-// Server exposes /metrics, /healthz and /readyz.
-type Server struct {
-	http      *http.Server
-	readiness *Readiness
-	log       *slog.Logger
+// Options configures the server.
+type Options struct {
+	// Listen is the address to bind. Empty disables the server entirely, in
+	// which case New returns nil and Run is a no-op.
+	Listen string
+	// Gatherer supplies the metrics. It is passed in rather than defaulting to
+	// the global registry, so a test can scrape its own.
+	Gatherer prometheus.Gatherer
+	// Readiness drives /readyz. When nil, a fresh one is used and the service
+	// never reports ready.
+	Readiness *Readiness
+	Log       *slog.Logger
 }
 
-// NewServer builds the observability endpoint. addr is empty to disable it, in
-// which case NewServer returns nil.
-func NewServer(addr string, gatherer prometheus.Gatherer, readiness *Readiness, log *slog.Logger) *Server {
-	if addr == "" {
+// Server exposes /metrics, /healthz and /readyz.
+type Server struct {
+	http *http.Server
+	log  *slog.Logger
+}
+
+// New builds the observability endpoint. It returns nil when opts.Listen is
+// empty.
+func New(opts Options) *Server {
+	if opts.Listen == "" {
 		return nil
 	}
+
+	log := opts.Log
 	if log == nil {
 		log = slog.Default()
 	}
+	readiness := opts.Readiness
 	if readiness == nil {
 		readiness = &Readiness{}
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
+
+	if opts.Gatherer != nil {
+		mux.Handle("GET /metrics", promhttp.HandlerFor(opts.Gatherer, promhttp.HandlerOpts{}))
+	}
 
 	// Liveness only says the process is scheduling goroutines. It must not
-	// depend on MariaDB or Redis, or a database outage would have the
-	// orchestrator kill the very thing that reports on it.
+	// depend on Redis, a database or the Docker daemon, or an outage there would
+	// have the orchestrator kill the very thing that reports on it.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writePlain(w, http.StatusOK, "ok")
 	})
@@ -71,12 +96,11 @@ func NewServer(addr string, gatherer prometheus.Gatherer, readiness *Readiness, 
 
 	return &Server{
 		http: &http.Server{
-			Addr:              addr,
+			Addr:              opts.Listen,
 			Handler:           mux,
 			ReadHeaderTimeout: 5 * time.Second,
 		},
-		readiness: readiness,
-		log:       log.With("component", "metrics"),
+		log: log.With("component", "obs"),
 	}
 }
 
@@ -107,10 +131,18 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 
 		if err := s.http.Shutdown(shutdownCtx); err != nil {
-			s.log.Warn("metrics server did not shut down cleanly", "err", err)
+			s.log.Warn("the metrics server did not shut down cleanly", "err", err)
 		}
 		return nil
 	}
+}
+
+// Addr reports the address the server binds, for tests and startup logs.
+func (s *Server) Addr() string {
+	if s == nil {
+		return ""
+	}
+	return s.http.Addr
 }
 
 func writePlain(w http.ResponseWriter, status int, body string) {
