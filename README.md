@@ -6,9 +6,13 @@ A Go rewrite of the `watchdog.sh` that ships with
 It is a **drop-in replacement**: the same environment variables configure it, the
 same Redis keys carry its state, and container restarts still go through the
 mailcow `dockerapi` service. Swapping the image is enough — `mailcow.conf` needs
-no changes.
+no changes. Where the behaviour differs anyway, it is listed in
+[DEVIATIONS.md](DEVIATIONS.md).
 
-The original is preserved under `orgiginal/watchdog/` for reference.
+The original is preserved under `original/watchdog/` for reference. The house
+style this repository shares with
+[mailcow-dockerapi](https://github.com/mailcow/mailcow-dockerized) is written down
+in [CONVENTIONS.md](CONVENTIONS.md).
 
 ---
 
@@ -21,61 +25,13 @@ The shell version worked, but its structure made three things hard:
   that is now in-process.
 - **Code quality.** The nineteen check functions were the same twelve lines of
   error accounting copy-pasted, which is how several of them drifted apart.
-- **Testability.** Nothing was testable. The bugs listed below had been in
-  production for years because there was no way to notice them.
+- **Testability.** Nothing was testable. The bugs listed in
+  [DEVIATIONS.md](DEVIATIONS.md) had been in production for years because there
+  was no way to notice them.
 
 The runtime image went from Alpine plus ~25 packages — including an `smtp-cli`
 downloaded from GitHub at build time over an unpinned URL — to a single static
 binary on distroless.
-
----
-
-## Bugs fixed from the original
-
-These were found while porting. All of them are fixed here; the behaviour is
-otherwise unchanged.
-
-| # | Where | Problem |
-|---|---|---|
-| 1 | all 19 checks | **The self-healing never worked.** `trap "[ ${err_count} -gt 1 ] && err_count=$(( ${err_count} - 2 ))" USR1` uses double quotes, so `${err_count}` expanded to `0` when the trap was *installed*. The trap body was literally `[ 0 -gt 1 ] && err_count=-2` — a no-op. The documented "reduce error count by 2 after restarting an unhealthy container" feature did not exist. |
-| 2 | `external_checks` | The IPv6 failure branch stored `${CHECK_REPONSE}` (the IPv4 body) instead of `${CHECK_REPONSE6}`, so the IPv6 report was lost. |
-| 3 | `cert_checks` | Resolved `postfix` and `dovecot` instead of `postfix-mailcow` / `dovecot-mailcow`. Under `IP_BY_DOCKER_API=1` the exact label match found nothing, returned the placeholder `240.0.0.0`, and the certificate check reported a permanent false alarm. |
-| 4 | `dovecot_repl`, `ratelimit`, `acme` | Hard-coded `redis-cli -h redis`, ignoring `REDIS_SLAVEOF_IP`. Only some calls honoured the replication setup. |
-| 5 | worker monitor | `sleep 10` sat *inside* the `for` loop over all workers, so one full pass took ~3 minutes instead of 10 seconds. |
-| 6 | `notify_error` | The throttle only re-armed when `TTL` returned `-2`. A key with no expiry (`-1`) blocked that notification forever. It was also a read-then-write race. Now a single atomic `SET NX EX`. |
-| 7 | webhook | Placeholders were substituted with `sed`, escaping only `/` and `&`. A subject or transcript containing `"`, `\` or a newline produced invalid JSON that the webhook silently rejected. Values are now JSON-escaped. |
-| 8 | `rspamd_checks` | Called `usr/bin/curl` without a leading slash; it only worked because the working directory happened to be `/`. |
-| 9 | `redis_checks` | Resolved a container IP into `host_ip` and then never used it. |
-| 10 | config | A threshold of `0` made a check report its service dead before the first probe, restarting the container in a tight loop. Now rejected at startup. |
-
-### Deliberately *not* "fixed"
-
-- **Nagios exit codes are summed into the error budget**, so a `CRITICAL` costs
-  two points and a `WARNING` one. This looks accidental, but the thresholds in
-  `mailcow.conf` are calibrated against it. Preserved exactly — see
-  `internal/health`.
-- **Checks that the shell implemented itself always added exactly one point**,
-  regardless of severity. Preserved via the `probe.Cost(1, …)` wrapper, which
-  keeps the reported severity honest for logs and metrics while pinning the cost.
-- **The health percentage** uses the original's integer arithmetic
-  (`((200*c/t)%2) + (100*c/t)`), verified against `bash` output, so the bars in
-  the mailcow UI do not shift.
-- **`WATCHDOG_LOG` record shapes** are byte-identical, including the message
-  sanitiser (`tr '\r\n%&;$"_[]{}-' ' '`) that turns `nginx-mailcow` into
-  `nginx mailcow`.
-- **The replication query stays `SHOW SLAVE STATUS`.** MariaDB added `REPLICA` as
-  a statement synonym in 10.5.1 ([MDEV-20601](https://jira.mariadb.org/browse/MDEV-20601))
-  but deliberately left the result columns alone, so `SHOW REPLICA STATUS` still
-  returns `Slave_IO_Running`, not `Replica_IO_Running`. Switching the statement
-  would buy nothing and would break the check on older installations. The Go
-  code's own vocabulary is primary/replica throughout; only the four column
-  constants keep MariaDB's spelling, because that is what the server sends.
-
-### One intentional behaviour change
-
-`F2B_RES` is no longer written. It was a private channel between the fail2ban
-check's subshell and the main loop — the only way a bash subshell could return
-data. New bans now travel in the event itself.
 
 ---
 
@@ -106,35 +62,15 @@ internal/supervisor/   runners, the pause gate, the event bus, the actions
 internal/store/        Redis, in the record formats the mailcow UI reads
 internal/dockerapi/    the mailcow dockerapi client
 internal/notify/       direct-to-MX mail, webhook, throttle
-internal/metrics/      Prometheus collectors and the HTTP endpoint
+internal/metrics/      Prometheus collectors
+internal/obs/          the /metrics, /healthz and /readyz endpoint
+internal/logging/      the structured logger
 internal/whois/        registry lookups for ban notifications
+original/              the replaced implementation, for reference
 ```
 
-Three shell constructs disappear:
-
-| Shell | Here | Why |
-|---|---|---|
-| FIFO `/tmp/com_pipe` | `chan Event` | The event carries the check and its health, so nothing has to be looked up again from `/tmp` and Redis. |
-| `kill -STOP` / `-CONT` | a cooperative `Gate` | Signalling a stopped process pauses a probe mid-handshake and can lose a `SIGCONT`. Runners pause between rounds instead. |
-| `kill -USR1` | `Tracker.Heal(2)` | A method that works, unlike the trap it replaces. |
-
-### Probe replacements
-
-| Was | Now |
-|---|---|
-| `check_http`, `check_tcp`, `check_smtp`, `check_imap`, `check_clamd` | `net`, `net/http`, `crypto/tls`, `net/textproto` |
-| `check_mysql`, `check_mysql_query`, `check_mysql_slavestatus.sh` | `database/sql` + `go-sql-driver/mysql` |
-| `check_dns.sh` (`dig` + `perl` for timing) | `miekg/dns`, including the DNSSEC AD flag |
-| `redis-cli` | `redis/go-redis` |
-| `smtp-cli` (Perl, curl'd from GitHub) | `net/smtp` with MX lookup and direct delivery |
-| `curl` + `jq` against dockerapi | `net/http` + `encoding/json` |
-| `whois` | `internal/whois` (IANA referral, then the regional registry) |
-
-TLS verification is disabled in exactly two places, both annotated: the dockerapi
-client (self-signed certificate on an internal network) and the internal service
-probes (they connect to container IPs while the certificates name the public
-hostname — the Nagios plugins behaved the same way, and `certExpiry` checks the
-validity dates explicitly).
+The shell constructs that disappear, and the tooling that goes with them, are
+listed in [DEVIATIONS.md](DEVIATIONS.md).
 
 ---
 
@@ -157,7 +93,8 @@ Every variable from the original is honoured. Additions:
 project's exporter registry and is fully allocated — 9099, the obvious first
 choice, belongs to the SQL exporter — and the wiki's advice for an application's
 own exporter is to stay out of it. 9393 also avoids every port mailcow uses
-internally (8081, 8642, 9000-9002, 9900, 10001, 10055, 11332-11334, 20000).
+internally (8081, 8642, 9000-9002, 9900, 10001, 10055, 11332-11334, 20000). The
+dockerapi serves the same three endpoints one port up, on 9394.
 
 ### Talking to Docker
 
@@ -207,7 +144,8 @@ make image     # container image
 ```
 
 The `go` directive pins a patch version: `1.26.6` is the first release without
-the five standard-library advisories govulncheck flags.
+the five standard-library advisories govulncheck flags. mailcow-dockerapi pins the
+same one.
 
 Test coverage is 72% overall — 97% for the error-budget arithmetic, 96% for the
 configuration, 89% for the supervisor. The protocol probes run against fake
