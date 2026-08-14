@@ -1,0 +1,56 @@
+# Forgejo Actions CI — runs on every push to main and every pull request.
+#
+# Prerequisites on the Forgejo instance:
+#   - Actions enabled for the repo (Settings → Actions).
+#   - A registered runner whose labels include `ubuntu-latest` (adjust `runs-on`
+#     below to match your runner, e.g. `docker`).
+#   - The default actions registry reachable (checkout/setup-go are mirrored on
+#     code.forgejo.org, Forgejo's default DEFAULT_ACTIONS_URL).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Not gofmt-clean:"; echo "$unformatted"
+            echo "Run 'make fmt'."
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint (incl. gosec)
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          "$(go env GOPATH)/bin/golangci-lint" run ./...
+
+      - name: govulncheck
+        run: make vuln
+
+      - name: Test (race detector)
+        run: go test -race -count=1 ./...
+
+      - name: Build
+        run: make build
+
+      - name: Build bench module
+        run: cd bench && go build ./...

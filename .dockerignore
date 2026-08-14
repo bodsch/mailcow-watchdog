@@ -1,0 +1,12 @@
+# Keep the build context to what the compiler actually needs, so an edit to the
+# README does not invalidate the dependency layer.
+.git
+.github
+.forgejo
+bin
+dist
+coverage.out
+orgiginal
+*.md
+Makefile
+.golangci.yml

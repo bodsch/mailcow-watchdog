@@ -1,0 +1,44 @@
+# golangci-lint v2 configuration.
+#
+# On top of the v2 default linters (errcheck, govet, ineffassign, staticcheck,
+# unused) this enables:
+#   - gosec:     security anti-patterns (the deliberate InsecureSkipVerify in the
+#                HTTP transport is annotated with //nolint:gosec and stays quiet)
+#   - bodyclose: every HTTP response body must be closed — critical for a probe
+#   - misspell:  doc/comment typos
+#
+# Security scanning also runs out-of-band via `make vuln` (govulncheck).
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - gosec
+    - bodyclose
+    - misspell
+  settings:
+    errcheck:
+      exclude-functions:
+        # Writes to stdout/stderr or to a ResponseWriter: there is nowhere left
+        # to report a failure to.
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        # Deferred Close on a connection, listener or result set the code has
+        # already finished with. The probes deliberately grade the protocol
+        # exchange, not the teardown, so a close error cannot change the verdict.
+        - (io.Closer).Close
+        - (io.ReadCloser).Close
+        - (net.Conn).Close
+        - (net.Listener).Close
+        - (*crypto/tls.Conn).Close
+        - (*database/sql.Rows).Close
+  exclusions:
+    rules:
+      # Test fixtures (httptest servers, redirect targets) intentionally do things
+      # gosec flags (open redirects, etc.); keep gosec on production code only.
+      - path: _test\.go
+        linters:
+          - gosec
