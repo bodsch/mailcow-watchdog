@@ -91,11 +91,29 @@ A check with threshold zero declared its service dead before the first probe.
 
 **Now:** Rejected at startup.
 
-## 2. One intentional behaviour change
+## 2. Intentional behaviour changes
 
-`F2B_RES` is no longer written. It was a private channel between the fail2ban
-check's subshell and the main loop — the only way a bash subshell could return
-data. New bans now travel in the event itself.
+### 2.1 `F2B_RES` is no longer written
+
+It was a private channel between the fail2ban check's subshell and the main loop —
+the only way a bash subshell could return data. New bans now travel in the event
+itself.
+
+### 2.2 The dockerapi probe completes the TLS handshake
+
+`watchdog.sh:1081` monitored the API with `while nc -z dockerapi 443; do sleep 3`,
+and this implementation took that over as a connect-and-close every
+`DockerAPIPoll`. Seen from the other end, a connection that closes before the
+ClientHello is a failed TLS handshake, so the dockerapi logged one every three
+seconds for as long as the watchdog ran — with nothing but an address in the line,
+which is a container the address belongs to only until the next restart.
+
+**Now:** over HTTPS the probe carries the handshake through
+(`internal/dockerapi.dialTCP`), with the transport's TLS config, so the same
+verification applies as to a request. Nothing is logged on the server side, and the
+answer is the more useful one: a listener that accepts but cannot serve TLS is
+reported as unreachable rather than as an endpoint the supervisor resumes every
+check for. Over plain HTTP there is no handshake and the probe stays a connection.
 
 ## 3. Deliberately preserved quirks
 

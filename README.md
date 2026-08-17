@@ -108,6 +108,14 @@ The scheme of `DOCKER_API_URL` picks both the transport and the API dialect:
 `DOCKER_API_DIALECT` overrides the second column for the unusual combination of a
 mailcow dockerapi reachable over a socket.
 
+While the endpoint is unreachable the supervisor pauses every check, so it is
+probed every three seconds — over HTTPS with a full TLS handshake rather than the
+`nc -z` connect-and-close the shell used. That answers the question that matters
+(can a request be made at all, not just is something listening) and leaves nothing
+in the dockerapi's log: a connection dropped before the ClientHello is a failed
+handshake on the other side, three seconds apart, for as long as the watchdog runs.
+See 2.2 in [DEVIATIONS.md](DEVIATIONS.md).
+
 The two endpoints answer the same requests in different shapes — the daemon puts
 the compose labels at the top level of its container list rather than under
 `Config`, reports `State` there as a word rather than an object, and serves
