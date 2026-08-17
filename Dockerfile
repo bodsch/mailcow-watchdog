@@ -11,9 +11,6 @@
 
 FROM golang:1.26.6-alpine AS build
 
-# git is only needed so `git describe` can stamp the version.
-RUN apk add --no-cache git
-
 WORKDIR /src
 
 # Copy the manifests first so the dependency layer is cached across source edits.
@@ -22,10 +19,16 @@ RUN go mod download && go mod verify
 
 COPY . .
 
+# VERSION is the only way the version reaches the binary: `git describe` cannot
+# run here, because .dockerignore keeps .git out of the build context. The CI
+# passes the tag; a plain `docker build` yields "dev", which is honest.
 ARG VERSION=dev
 ENV CGO_ENABLED=0 GOOS=linux
 
-RUN go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+# ${VERSION:-dev} guards against an explicitly empty --build-arg VERSION=, which
+# would stamp an empty string and read as a broken build rather than an unstamped
+# one.
+RUN go build -trimpath -ldflags "-s -w -X main.version=${VERSION:-dev}" \
       -o /out/watchdog ./cmd/watchdog
 
 

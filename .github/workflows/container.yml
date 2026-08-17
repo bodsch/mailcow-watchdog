@@ -81,6 +81,12 @@ jobs:
           context: .
           file: Dockerfile
           platforms: ${{ matrix.distribution.platform }}
+          # Without this the Dockerfile's `ARG VERSION=dev` stays as it is and the
+          # image reports version="dev" — in its startup line and in
+          # mailcow_watchdog_build_info. On a tag push the version is the tag; on a
+          # manual run it is the input, because github.ref_name is the branch then.
+          build-args: |
+            VERSION=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
           push: true
           pull: true
           # optional: scheduled rebuild ohne Cache
