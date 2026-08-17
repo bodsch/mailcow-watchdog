@@ -337,6 +337,25 @@ func TestValidationErrors(t *testing.T) {
 			overrides: map[string]string{"WATCHDOG_SETTLE_DELAY": "half a minute"},
 			want:      "WATCHDOG_SETTLE_DELAY",
 		},
+		// The variable holds an address to bind, and the name reads like it wants
+		// the URL a scrape would use.
+		{
+			name:      "metrics listen as a URL",
+			overrides: map[string]string{"WATCHDOG_METRICS_LISTEN": "http://127.0.0.1:9393/metrics"},
+			want:      "not a URL",
+		},
+		// Even without a path the "//" of a scheme is enough to recognise a URL,
+		// which is the more useful of the two messages.
+		{
+			name:      "metrics listen as a bare URL",
+			overrides: map[string]string{"WATCHDOG_METRICS_LISTEN": "http://127.0.0.1:9393"},
+			want:      "not a URL",
+		},
+		{
+			name:      "metrics listen without a port",
+			overrides: map[string]string{"WATCHDOG_METRICS_LISTEN": "9393"},
+			want:      "WATCHDOG_METRICS_LISTEN must be a host:port address",
+		},
 	}
 
 	for _, tc := range tests {
@@ -354,6 +373,22 @@ func TestValidationErrors(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error = %q, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The address forms an operator actually uses have to survive validation —
+// including the empty one, which switches the endpoint off.
+func TestMetricsListenAccepted(t *testing.T) {
+	for _, addr := range []string{":9393", "127.0.0.1:9393", "0.0.0.0:9393", "[::1]:9393", ""} {
+		t.Run(addr, func(t *testing.T) {
+			cfg := loadWith(t, map[string]string{"WATCHDOG_METRICS_LISTEN": addr})
+
+			// An unset variable falls back to the default rather than staying
+			// empty, so only a non-empty value is compared.
+			if addr != "" && cfg.Obs.Listen != addr {
+				t.Errorf("Obs.Listen = %q, want %q", cfg.Obs.Listen, addr)
 			}
 		})
 	}

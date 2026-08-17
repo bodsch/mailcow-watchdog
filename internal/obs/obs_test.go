@@ -1,8 +1,10 @@
 package obs
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -114,6 +116,30 @@ func TestRunReportsABrokenListener(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "serving metrics") {
 		t.Errorf("Run: error %q does not name the operation", err)
+	}
+}
+
+// A URL where a bind address belongs is the mistake the variable's name invites,
+// and net.Listen rejects it. What must not happen is the process logging that it
+// serves metrics anyway: a scrape then gets a reset connection — through a
+// published port, a refused one looks exactly like that — and the log says
+// nothing.
+func TestRunRejectsAURLAsAnAddress(t *testing.T) {
+	var logged bytes.Buffer
+	srv := New(Options{
+		Listen: "http://127.0.0.1:9393/metrics",
+		Log:    slog.New(slog.NewJSONHandler(&logged, nil)),
+	})
+
+	if err := srv.Run(context.Background()); err == nil {
+		t.Fatal("Run: expected an error for a URL instead of a host:port address")
+	}
+
+	if got := logged.String(); strings.Contains(got, "serving metrics") {
+		t.Errorf("the log claims the endpoint is being served: %q", got)
+	}
+	if got := logged.String(); !strings.Contains(got, "cannot bind the metrics endpoint") {
+		t.Errorf("the bind failure never reached the log: %q", got)
 	}
 }
 
