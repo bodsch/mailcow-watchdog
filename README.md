@@ -89,6 +89,17 @@ Every variable from the original is honoured. Additions:
 | `DOCKER_API_URL` | derived from `COMPOSE_PROJECT_NAME` | `https://…` or `unix:///var/run/docker.sock` |
 | `DOCKER_API_DIALECT` | `auto` | `auto`, `mailcow` or `engine` |
 
+`WATCHDOG_METRICS_LISTEN` is an address to **bind**, not a URL to scrape: `":9393"`, or
+`"127.0.0.1:9393"` to keep it off the network. A URL such as
+`http://127.0.0.1:9393/metrics` is rejected at startup — the paths of the three
+endpoints are fixed and a scheme has nowhere to go.
+
+Inside a container, `127.0.0.1` is the container's own loopback. A published port
+(`-p 9393:9393`) forwards to the container's bridge address instead, finds
+nothing listening there, and a scrape fails with a **reset connection** rather than
+a refused one — which reads like a server problem and is not one. Bind `":9393"`
+when the endpoint has to be reachable from outside the container.
+
 `:9393` sits deliberately outside 9100-9999. That range is the Prometheus
 project's exporter registry and is fully allocated — 9099, the obvious first
 choice, belongs to the SQL exporter — and the wiki's advice for an application's

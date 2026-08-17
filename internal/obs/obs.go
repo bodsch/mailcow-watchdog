@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -113,10 +114,24 @@ func (s *Server) Run(ctx context.Context) error {
 		return nil
 	}
 
+	// The listener is opened here rather than left to ListenAndServe so that a
+	// bind failure is loud where it happens. Whoever collects the returned error
+	// may not look at it until shutdown, and until then the line below would
+	// claim the endpoint was being served — a scrape then answers with a reset
+	// connection and nothing in the log explains why.
+	ln, err := net.Listen("tcp", s.http.Addr)
+	if err != nil {
+		s.log.Error("cannot bind the metrics endpoint", "addr", s.http.Addr, "err", err)
+		return fmt.Errorf("serving metrics on %s: %w", s.http.Addr, err)
+	}
+
 	errs := make(chan error, 1)
 	go func() {
-		s.log.Info("serving metrics", "addr", s.http.Addr)
-		if err := s.http.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// The listener's address, not the configured one: ":9393" becomes
+		// "[::]:9393", which answers the question a bound address is usually
+		// looked up for — which interfaces it covers.
+		s.log.Info("serving metrics", "addr", ln.Addr().String())
+		if err := s.http.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errs <- fmt.Errorf("serving metrics on %s: %w", s.http.Addr, err)
 			return
 		}
