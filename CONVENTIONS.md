@@ -119,8 +119,12 @@ counters. A registry is passed in, never `prometheus.DefaultRegisterer`.
 7. `readiness.SetReady(true)`
 8. the service loop, then shutdown bounded by a named timeout constant
 
-`version` is a package-level `var version = "dev"`, set via
-`-ldflags "-X main.version=..."`.
+`version` and `buildDate` are package-level vars (`"dev"` and `"unknown"`), set
+via `-ldflags "-X main.version=... -X main.buildDate=..."`. Both appear in the
+startup line and as the labels of `<service>_build_info`, so every build path —
+`make`, `make image`, the release workflow, the container workflow — has to pass
+them; a plain `go build` keeps the fallbacks. `buildDate` is a UTC day
+(`YYYY-MM-DD`), not a timestamp.
 
 ## Package and API conventions
 

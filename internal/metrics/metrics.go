@@ -34,8 +34,19 @@ type Metrics struct {
 	info   *prometheus.GaugeVec
 }
 
+// Build identifies the running binary. Both fields are stamped at link time with
+// -X; an unstamped build carries the fallbacks main declares, never an empty
+// label.
+type Build struct {
+	// Version is a release tag, or "dev" for a build that came from neither the
+	// Makefile nor CI.
+	Version string
+	// Date is the UTC day the binary was linked, as YYYY-MM-DD, or "unknown".
+	Date string
+}
+
 // New builds the collectors and registers them with reg.
-func New(reg prometheus.Registerer, version string) *Metrics {
+func New(reg prometheus.Registerer, build Build) *Metrics {
 	m := &Metrics{
 		healthPercent: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: namespace,
@@ -104,7 +115,7 @@ func New(reg prometheus.Registerer, version string) *Metrics {
 			Namespace: namespace,
 			Name:      "build_info",
 			Help:      "Build information, always 1.",
-		}, []string{"version"}),
+		}, []string{"version", "build_date"}),
 	}
 
 	reg.MustRegister(
@@ -114,7 +125,7 @@ func New(reg prometheus.Registerer, version string) *Metrics {
 		m.notifications, m.paused, m.info,
 	)
 
-	m.info.WithLabelValues(version).Set(1)
+	m.info.WithLabelValues(build.Version, build.Date).Set(1)
 	return m
 }
 

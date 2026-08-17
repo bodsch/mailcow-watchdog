@@ -40,7 +40,8 @@ binary on distroless.
 - **Prometheus metrics** on `:9393/metrics` (`WATCHDOG_METRICS_LISTEN`):
   per-check health and error budget, probe latency histograms and outcome
   counters, restart counters by result, notification outcomes, and a `paused`
-  gauge.
+  gauge. `mailcow_watchdog_build_info{version,build_date}` identifies the running
+  binary — see [Version stamping](#version-stamping).
 - **`/healthz` and `/readyz`.** Liveness deliberately does *not* depend on
   MariaDB or Redis — otherwise a database outage would have the orchestrator kill
   the very thing reporting on it. Readiness stays negative until both are up.
@@ -136,6 +137,27 @@ the process idle rather than exit, so compose does not see a crash loop.
 mailcow's `docker-compose.yml` passes every threshold explicitly, so the defaults
 in `internal/config` only apply when the watchdog runs outside the compose stack.
 They mirror the compose values.
+
+---
+
+## Version stamping
+
+`version` and `build_date` are linked into the binary with `-X`; they appear in the
+startup line and as the labels of `mailcow_watchdog_build_info`. Every build path
+stamps them:
+
+| Build | Version | Date |
+|---|---|---|
+| `make build` / `make release` | `git describe --tags --always --dirty` | UTC day |
+| `make image` | same, via `--build-arg` | same |
+| Release workflow (tag) | the tag | UTC day |
+| Container workflow (tag) | the tag | UTC day |
+| plain `go build` | `dev` | `unknown` |
+
+An image reporting `version="dev"` was therefore built without its build
+arguments — `docker build` without `--build-arg VERSION=…`, or a CI step that
+forgets to pass them. The date is a UTC day rather than a timestamp so two builds
+of the same release stay comparable.
 
 ---
 

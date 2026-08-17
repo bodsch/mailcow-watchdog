@@ -19,7 +19,12 @@ DIST_DIR := dist
 # Version metadata, overridable from the environment / CI.
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-LDFLAGS := -s -w -X main.version=$(VERSION)
+# BUILD_DATE is a UTC day, not a timestamp: it is what the release workflow
+# stamps, it keeps two builds of the same release comparable, and it is coarse
+# enough not to make an otherwise identical build differ by the second.
+BUILD_DATE ?= $(shell date -u +%Y-%m-%d)
+
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.buildDate=$(BUILD_DATE)
 
 # Static binaries: the runtime image is distroless, there is nothing to link
 # against. The race detector is the exception — see the test target.
@@ -95,7 +100,8 @@ ci: fmt vet lint vuln test build ## Full CI pipeline: fmt, vet, lint, vuln, test
 
 .PHONY: image
 image: ## Build the container image.
-	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
+	docker build --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
+		-t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
 
 .PHONY: release
 release: ## Cross-compile static release binaries into dist/.

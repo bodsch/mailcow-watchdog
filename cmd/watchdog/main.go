@@ -34,8 +34,13 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
-// version is set at build time from the Makefile.
-var version = "dev"
+// version and buildDate are set at build time, from the Makefile or from CI,
+// with -X. The fallbacks are what a plain `go build` produces, and they are
+// spelled out rather than left empty so a metric label always has a value.
+var (
+	version   = "dev"
+	buildDate = "unknown"
+)
 
 // dependencyPoll is how often startup retests MariaDB and Redis. watchdog.sh
 // used two seconds.
@@ -63,6 +68,7 @@ func run() error {
 	slog.SetDefault(log)
 	log.Info("mailcow watchdog starting",
 		"version", version,
+		"build_date", buildDate,
 		"hostname", cfg.Mailcow.Hostname,
 		"project", cfg.Mailcow.ComposeProject,
 		"log_level", cfg.Log.Level,
@@ -78,7 +84,7 @@ func run() error {
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
-	m := metrics.New(registry, version)
+	m := metrics.New(registry, metrics.Build{Version: version, Date: buildDate})
 
 	readiness := &obs.Readiness{}
 	obsServer := obs.New(obs.Options{

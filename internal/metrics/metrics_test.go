@@ -10,7 +10,7 @@ import (
 
 func TestObserveHealth(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	m := New(reg, "test")
+	m := New(reg, Build{Version: "test"})
 
 	m.ObserveHealth("nginx", health.Snapshot{
 		Service:   "Nginx",
@@ -34,7 +34,7 @@ func TestObserveHealth(t *testing.T) {
 // so every enabled check publishes a full budget at startup.
 func TestInitCheckPublishesFullHealth(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	m := New(reg, "test")
+	m := New(reg, Build{Version: "test"})
 
 	m.InitCheck("dovecot", 12)
 
@@ -48,7 +48,7 @@ func TestInitCheckPublishesFullHealth(t *testing.T) {
 
 func TestObserveProbeCountsByStatus(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	m := New(reg, "test")
+	m := New(reg, Build{Version: "test"})
 
 	m.ObserveProbe("dovecot", "imap-993", health.StatusOK, 0.02)
 	m.ObserveProbe("dovecot", "imap-993", health.StatusCritical, 9.9)
@@ -64,7 +64,7 @@ func TestObserveProbeCountsByStatus(t *testing.T) {
 
 func TestCountersAndPausedGauge(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	m := New(reg, "test")
+	m := New(reg, Build{Version: "test"})
 
 	m.ObserveExhausted("nginx")
 	m.ObserveRestart("nginx-mailcow", "restarted")
@@ -88,7 +88,9 @@ func TestCountersAndPausedGauge(t *testing.T) {
 
 func TestBuildInfo(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	New(reg, "1.2.3")
+	New(reg, Build{Version: "1.2.3", Date: "2026-08-17"})
+
+	want := map[string]string{"version": "1.2.3", "build_date": "2026-08-17"}
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -99,14 +101,19 @@ func TestBuildInfo(t *testing.T) {
 			continue
 		}
 		for _, metric := range family.GetMetric() {
+			got := map[string]string{}
 			for _, label := range metric.GetLabel() {
-				if label.GetName() == "version" && label.GetValue() == "1.2.3" {
-					return
+				got[label.GetName()] = label.GetValue()
+			}
+			for name, value := range want {
+				if got[name] != value {
+					t.Errorf("build_info label %s = %q, want %q", name, got[name], value)
 				}
 			}
+			return
 		}
 	}
-	t.Error("build_info does not carry the version")
+	t.Error("build_info was not exposed at all")
 }
 
 // The HTTP endpoints that expose these collectors live in internal/obs and are
