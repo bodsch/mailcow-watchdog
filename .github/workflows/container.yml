@@ -75,12 +75,26 @@ jobs:
             type=semver,pattern={{ version }}
             type=semver,pattern={{major}}.{{minor}}
 
+      - name: Resolve the build date
+        id: built
+        # GitHub expressions have no clock, so the day comes from a step. It is a
+        # UTC day rather than a timestamp, matching what the Makefile and the
+        # release workflow stamp.
+        run: echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
       - name: Build & push
         uses: docker/build-push-action@v7.3.0
         with:
           context: .
           file: Dockerfile
           platforms: ${{ matrix.distribution.platform }}
+          # Without this the Dockerfile's `ARG VERSION=dev` stays as it is and the
+          # image reports version="dev" — in its startup line and in
+          # mailcow_watchdog_build_info. On a tag push the version is the tag; on a
+          # manual run it is the input, because github.ref_name is the branch then.
+          build-args: |
+            VERSION=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+            BUILD_DATE=${{ steps.built.outputs.date }}
           push: true
           pull: true
           # optional: scheduled rebuild ohne Cache

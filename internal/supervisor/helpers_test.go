@@ -205,7 +205,7 @@ func (discardWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 // newMetrics builds a metrics set on a private registry.
 func newMetrics() *metrics.Metrics {
-	return metrics.New(prometheus.NewRegistry(), "test")
+	return metrics.New(prometheus.NewRegistry(), metrics.Build{Version: "test"})
 }
 
 // testCheck builds a check with the given probes and short timings.
