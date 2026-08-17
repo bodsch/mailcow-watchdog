@@ -37,6 +37,11 @@ const (
 // defaultTimeout bounds a single API call.
 const defaultTimeout = 10 * time.Second
 
+// reachTimeout bounds one reachability probe. It has to stay below the
+// supervisor's poll interval, and it covers a TLS handshake against the
+// dockerapi's 4096-bit key rather than a bare connection.
+const reachTimeout = 3 * time.Second
+
 // unixAuthority is the host part of every request URL over a unix socket. The
 // dialer ignores the address, but net/http still needs a syntactically valid one.
 const unixAuthority = "http://docker"
@@ -107,7 +112,9 @@ func New(opts Options) (*Client, error) {
 		}
 		transport = tcpTransport(parsed.Scheme == "https")
 		c.baseURL = strings.TrimSuffix(strings.TrimSuffix(opts.BaseURL, "/"), parsed.Path)
-		c.reach = dialTCP(parsed)
+		// A plain HTTP endpoint has no TLS config, and the probe then stops at
+		// the connection — there is no handshake to complete.
+		c.reach = dialTCP(parsed, transport.TLSClientConfig)
 		implied = DialectMailcow
 
 	case "":
@@ -157,7 +164,7 @@ func tcpTransport(secure bool) *http.Transport {
 
 func dialUnix(socket string) func(context.Context) bool {
 	return func(ctx context.Context) bool {
-		d := &net.Dialer{Timeout: 3 * time.Second}
+		d := &net.Dialer{Timeout: reachTimeout}
 		conn, err := d.DialContext(ctx, "unix", socket)
 		if err != nil {
 			return false
@@ -167,25 +174,52 @@ func dialUnix(socket string) func(context.Context) bool {
 	}
 }
 
-func dialTCP(endpoint *url.URL) func(context.Context) bool {
-	host := endpoint.Hostname()
-	port := endpoint.Port()
-	if port == "" {
-		port = "443"
-		if endpoint.Scheme == "http" {
-			port = "80"
-		}
-	}
+// dialTCP probes a TCP endpoint. A non-nil tlsConfig makes the probe complete the
+// TLS handshake instead of stopping at the connection.
+//
+// Two reasons to carry the handshake through. It answers the question actually
+// being asked — a listener that accepts but cannot serve TLS is not an endpoint
+// this client can use, and the supervisor would keep every check paused waiting
+// for one that is never coming. And it leaves the server nothing to report:
+// closing before the ClientHello is what makes mailcow-dockerapi log a failed
+// handshake, once per poll, for as long as the watchdog runs.
+func dialTCP(endpoint *url.URL, tlsConfig *tls.Config) func(context.Context) bool {
+	addr := net.JoinHostPort(endpoint.Hostname(), reachPort(endpoint))
 
 	return func(ctx context.Context) bool {
-		d := &net.Dialer{Timeout: 3 * time.Second}
-		conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, port))
+		dialer := &net.Dialer{Timeout: reachTimeout}
+
+		var conn net.Conn
+		var err error
+		if tlsConfig == nil {
+			conn, err = dialer.DialContext(ctx, "tcp", addr)
+		} else {
+			// The config is the transport's, so the probe applies the same TLS
+			// policy as a request would — including the skipped verification of
+			// the self-signed certificate. What is tested is that the server
+			// completes a handshake, not who it claims to be.
+			tlsDialer := &tls.Dialer{NetDialer: dialer, Config: tlsConfig}
+			conn, err = tlsDialer.DialContext(ctx, "tcp", addr)
+		}
 		if err != nil {
 			return false
 		}
+
 		_ = conn.Close()
 		return true
 	}
+}
+
+// reachPort is the port to probe, defaulted from the scheme the way a request
+// would default it.
+func reachPort(endpoint *url.URL) string {
+	if port := endpoint.Port(); port != "" {
+		return port
+	}
+	if endpoint.Scheme == "http" {
+		return "80"
+	}
+	return "443"
 }
 
 // List returns every running container in this compose project.
@@ -363,7 +397,9 @@ func (c *Client) Running(ctx context.Context, id, want string) (bool, error) {
 	return false, nil
 }
 
-// Reachable reports whether the endpoint accepts connections.
+// Reachable reports whether the endpoint can be connected to — over HTTPS,
+// whether it completes a TLS handshake, which is the weakest thing a request
+// needs from it.
 //
 // The supervisor pauses every check while this is false: without the API it
 // cannot resolve container addresses, so the probes would fail for a reason that

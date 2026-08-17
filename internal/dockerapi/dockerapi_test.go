@@ -3,9 +3,11 @@ package dockerapi
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -563,6 +565,139 @@ func TestReachable(t *testing.T) {
 			t.Error("Reachable() = true for a closed port")
 		}
 	})
+}
+
+// serverLog collects what a test server writes to its ErrorLog.
+type serverLog struct {
+	mu   sync.Mutex
+	text strings.Builder
+}
+
+func (l *serverLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.text.Write(p)
+}
+
+func (l *serverLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return l.text.String()
+}
+
+// The probe runs every DockerAPIPoll for the lifetime of the process, so it must
+// not leave a trace on the other side. A connection dropped before the ClientHello
+// has net/http log a failed handshake — which is what the dockerapi used to fill
+// its log with, three seconds apart.
+func TestReachableLeavesNothingInTheServerLog(t *testing.T) {
+	logged := &serverLog{}
+	closed := make(chan struct{}, 1)
+
+	// Unstarted, because both hooks have to be in place before the listener is.
+	srv := httptest.NewUnstartedServer(jsonHandler(t, nil))
+	srv.Config.ErrorLog = log.New(logged, "", 0)
+	// net/http writes the handshake error before it marks the connection closed,
+	// so waiting for that state is what makes the assertion below deterministic
+	// rather than a race against the server's goroutine.
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateClosed {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+		}
+	}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+
+	client, err := New(Options{BaseURL: srv.URL, Project: "mailcowdockerized", IPv4Network: "172.22.1"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if !client.Reachable(context.Background()) {
+		t.Fatal("Reachable() = false for a live TLS server")
+	}
+
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server never finished with the probe's connection")
+	}
+
+	if got := logged.String(); got != "" {
+		t.Errorf("the server logged %q; the probe has to complete the handshake", got)
+	}
+}
+
+// A listener that accepts and hangs up serves no request, so reporting it as
+// reachable would only have the supervisor resume checks that cannot work.
+func TestReachableRejectsAListenerWithoutTLS(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	client, err := New(Options{BaseURL: "https://" + ln.Addr().String()})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if client.Reachable(context.Background()) {
+		t.Error("Reachable() = true for a listener that cannot speak TLS")
+	}
+}
+
+// Over plain HTTP there is no handshake to complete, so the probe stays a
+// connection — and the port still comes from the scheme.
+func TestReachableOverPlainHTTP(t *testing.T) {
+	srv := httptest.NewServer(jsonHandler(t, nil))
+	t.Cleanup(srv.Close)
+
+	client, err := New(Options{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if !client.Reachable(context.Background()) {
+		t.Error("Reachable() = false for a live HTTP server")
+	}
+}
+
+func TestReachPort(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"https://dockerapi.mailcowdockerized_mailcow-network", "443"},
+		{"http://dockerapi", "80"},
+		{"https://dockerapi:8443", "8443"},
+		{"http://127.0.0.1:12345", "12345"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			parsed, err := url.Parse(tt.url)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got := reachPort(parsed); got != tt.want {
+				t.Errorf("reachPort(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestAPIErrorsAreReported(t *testing.T) {
