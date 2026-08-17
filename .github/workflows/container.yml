@@ -1,0 +1,91 @@
+---
+
+name: Build container
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. 1.2.3). Required for manual dispatch."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # Ziel-Images
+  IMAGE_GHCR: ghcr.io/bodsch/mailcow-watchdog
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: "build"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distribution:
+          - version: "latest"
+            platform: "linux/amd64"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+
+      # QEMU nur nötig, wenn ihr später arm64 etc. ergänzt
+      - name: Set up QEMU
+        if: contains(matrix.distribution.platform, 'arm')
+        uses: docker/setup-qemu-action@v4.2.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4.2.0
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GH_DOCKER_REGISTRY_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4.6.0
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Docker metadata (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v6.2.0
+        with:
+          images: |
+            ${{ env.IMAGE_GHCR }}
+          tags: |
+            type=raw,value=${{ matrix.distribution.version }}
+            type=sha,format=short,prefix=${{ matrix.distribution.version }}-
+            # type=ref,event=branch
+            # type=ref,event=pr
+            type=semver,pattern={{ version }}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build & push
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.distribution.platform }}
+          push: true
+          pull: true
+          # optional: scheduled rebuild ohne Cache
+          no-cache: ${{ github.event_name == 'schedule' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.distribution.platform }}-${{ matrix.distribution.version }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.distribution.platform }}-${{ matrix.distribution.version }}

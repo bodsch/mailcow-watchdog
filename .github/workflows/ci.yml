@@ -1,0 +1,34 @@
+# Continuous integration: smoke build of the Go module.
+# Runs on every push to main, on merge/pull requests, and on manual dispatch.
+# Does NOT publish anything - releasing is handled by release.yml.
+# Code formatting, linting, and testing is handled by pre-commit hooks (see .pre-commit-config.yaml).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  GO_VERSION: "1.26.6"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+#    defaults:
+#      run:
+#        working-directory: go
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+
+      - name: Build (smoke)
+        run: |
+          go build -trimpath -o /tmp/watchdog ./cmd/watchdog
+          ls -lth /tmp/watchdog
