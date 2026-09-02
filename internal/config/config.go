@@ -45,6 +45,12 @@ const (
 	CertThreshold = 7
 )
 
+// DefaultCheckInterval is the lower bound of the shell's sleep window,
+// `sleep $(( ( RANDOM % 60 ) + 20 ))`. Unset therefore means "the cadence
+// watchdog.sh had". check.Intervals holds the matching upper bounds, and a test
+// there pins the two spellings of this number together.
+const DefaultCheckInterval = 20 * time.Second
+
 // DefaultObsListen is where the observability endpoint binds.
 //
 // It sits deliberately outside 9100-9999: that range is the Prometheus project's
@@ -68,6 +74,15 @@ type Config struct {
 	// SettleDelay is the grace period before the first probe, giving the rest
 	// of the stack time to come up. watchdog.sh counted down from 30.
 	SettleDelay time.Duration
+
+	// CheckInterval is the shortest pause between two rounds of the same check.
+	//
+	// The shell hard-coded `sleep $(( ( RANDOM % 60 ) + 20 ))`, so nineteen
+	// checks probed the stack every twenty to seventy-nine seconds and there was
+	// no way to ask for less. This is that lower bound, and no check runs more
+	// often than it — see check.Intervals for how the individual windows are
+	// derived from it.
+	CheckInterval time.Duration
 
 	Mailcow  Mailcow
 	DB       DB
@@ -260,6 +275,13 @@ func (c *Config) validate() error {
 	}
 	if c.Checks.MySQLRepl.Enabled && c.DB.Root == "" {
 		return fmt.Errorf("DBROOT must be set when WATCHDOG_MYSQL_REPLICATION_CHECKS is enabled")
+	}
+	// Zero or negative would make every sleep return immediately, and nineteen
+	// checks in a tight loop would hammer the very stack they measure. A refusal
+	// at startup is the only safe answer: the alternative is a watchdog that
+	// looks configured and behaves like a load generator.
+	if c.CheckInterval <= 0 {
+		return fmt.Errorf("WATCHDOG_CHECK_INTERVAL must be positive (got %s)", c.CheckInterval)
 	}
 	switch c.Docker.Dialect {
 	case "", "auto", "mailcow", "engine", "docker":

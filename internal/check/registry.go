@@ -47,14 +47,60 @@ const InitDBProcess = "php -c /usr/local/etc/php -f /web/inc/init_db.inc.php"
 // PHPFPMService is the one container whose restart is gated on InitDBProcess.
 const PHPFPMService = svcPHPFPM
 
-// The sleep windows from watchdog.sh. `sleep $(( ( RANDOM % 60 ) + 20 ))` covers
-// 20 to 79 seconds inclusive, and the two outliers are spelled out.
-var (
-	standardInterval = Interval{Min: 20 * time.Second, Max: 79 * time.Second}
-	clamdInterval    = Interval{Min: 20 * time.Second, Max: 139 * time.Second}
-	externalInterval = Interval{Min: 30 * time.Minute, Max: 30*time.Minute + 19*time.Second}
-	certInterval     = Fixed(5 * time.Minute)
+// The sleep windows from watchdog.sh, as the numbers the shell used.
+//
+// `sleep $(( ( RANDOM % 60 ) + 20 ))` covers 20 to 79 seconds inclusive; clamd
+// drew from `RANDOM % 120` and the external checks slept half an hour. The
+// jitter is what keeps nineteen checks that all started at the same moment from
+// hitting the stack in lockstep.
+const (
+	originalInterval = 20 * time.Second
+	standardJitter   = 59 * time.Second
+	clamdJitter      = 119 * time.Second
+
+	originalExternal = 30 * time.Minute
+	externalJitter   = 19 * time.Second
+
+	originalCert = 5 * time.Minute
 )
+
+// Windows are the four sleep windows the checks use.
+type Windows struct {
+	Standard Interval
+	Clamd    Interval
+	External Interval
+	Cert     Interval
+}
+
+// Intervals derives the sleep windows from the configured lower bound.
+//
+// The jitter stays the size the shell gave it rather than growing with the
+// interval: its job is to spread nineteen checks apart, and a minute of spread
+// does that as well at five-minute rounds as it did at twenty-second ones.
+// Scaling it instead would turn WATCHDOG_CHECK_INTERVAL=5m into rounds anywhere
+// between five and twenty minutes, which is not what asking for five minutes
+// should mean.
+//
+// The two long-running checks are raised to the configured bound but never
+// lowered below their own: an operator asking for calmer rounds cannot end up
+// with the certificate check running more often than everything else, and one
+// asking for busier rounds does not get the external checks — which reach out
+// over the public network — every twenty seconds.
+//
+// A non-positive base means the caller built a Config by hand rather than
+// through config.Load. It is treated as the original cadence, because the
+// alternative is a zero sleep and nineteen checks in a tight loop.
+func Intervals(base time.Duration) Windows {
+	if base <= 0 {
+		base = originalInterval
+	}
+	return Windows{
+		Standard: Interval{Min: base, Max: base + standardJitter},
+		Clamd:    Interval{Min: base, Max: base + clamdJitter},
+		External: Interval{Min: max(base, originalExternal), Max: max(base, originalExternal) + externalJitter},
+		Cert:     Fixed(max(base, originalCert)),
+	}
+}
 
 // Deps is everything the checks need in order to be built.
 type Deps struct {
@@ -87,6 +133,7 @@ func Build(deps Deps) ([]*Check, error) {
 
 	cfg := deps.Config
 	at := deps.Resolver.Addr
+	window := Intervals(cfg.CheckInterval)
 
 	// Without a replication setup both point at the same instance anyway.
 	localRedis := deps.LocalStore
@@ -100,7 +147,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "nginx", Service: "Nginx", Event: svcNginx,
 			Threshold: cfg.Checks.Nginx.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.NewHTTP("http-8081", at(svcNginx), 8081, "/"),
 			},
@@ -108,12 +155,12 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "external", Service: "External checks", Event: "external_checks",
 			Threshold: cfg.Checks.External.Threshold,
-			Interval:  externalInterval, DeadDelay: time.Minute,
+			Interval:  window.External, DeadDelay: time.Minute,
 		},
 		{
 			Name: "mysql-repl", Service: "MySQL/MariaDB replication", Event: "mysql_repl_checks",
 			Threshold: cfg.Checks.MySQLRepl.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Minute,
+			Interval:  window.Standard, DeadDelay: time.Minute,
 			Probes: []probe.Probe{
 				probe.NewMySQLReplication("replica-status", deps.RootDB),
 			},
@@ -121,7 +168,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "mysql", Service: "MySQL/MariaDB", Event: svcMySQL,
 			Threshold: cfg.Checks.MySQL.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.NewMySQLPing("connect", deps.AppDB),
 				probe.NewMySQLQuery("table-count", deps.AppDB, tableCountQuery),
@@ -130,7 +177,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "redis", Service: "Redis", Event: svcRedis,
 			Threshold: cfg.Checks.Redis.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.NewRedisPing("ping", localRedis),
 			},
@@ -138,7 +185,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "php-fpm", Service: "PHP-FPM", Event: svcPHPFPM,
 			Threshold: cfg.Checks.PHPFPM.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.NewTCP("fpm-9001", at(svcPHPFPM), 9001, probe.TCPOptions{}),
 				probe.NewTCP("fpm-9002", at(svcPHPFPM), 9002, probe.TCPOptions{}),
@@ -147,7 +194,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "sogo", Service: "SOGo", Event: svcSOGo,
 			Threshold: cfg.Checks.SOGo.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.NewHTTP("http-20000", at(svcSOGo), 20000, "/SOGo.index/"),
 			},
@@ -155,7 +202,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "unbound", Service: "Unbound", Event: svcUnbound,
 			Threshold: cfg.Checks.Unbound.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.NewDNS("lookup", at(svcUnbound), probe.DNSPort, "stackoverflow.com"),
 				// The shell added a literal one point for a DNSSEC failure
@@ -166,7 +213,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "clamd", Service: "Clamd", Event: svcClamd,
 			Threshold: cfg.Checks.Clamd.Threshold,
-			Interval:  clamdInterval, DeadDelay: time.Second,
+			Interval:  window.Clamd, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.NewClamd("ping", at(svcClamd)),
 			},
@@ -174,7 +221,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "postfix", Service: "Postfix", Event: svcPostfix,
 			Threshold: cfg.Checks.Postfix.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.NewSMTP("transaction", at(svcPostfix), 589, probe.SMTPOptions{
 					HELO: cfg.Mailcow.Hostname,
@@ -194,7 +241,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "mailq", Service: "Mail queue", Event: "mail_queue_status",
 			Threshold: cfg.Checks.Mailq.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Minute,
+			Interval:  window.Standard, DeadDelay: time.Minute,
 			Probes: []probe.Probe{
 				probe.Cost(1, probe.NewMailq("deferred", cfg.MailqDir, cfg.Checks.MailqCritical)),
 			},
@@ -202,7 +249,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "postfix-tlspol", Service: "Postfix TLS Policy companion", Event: svcPostfixTLSPol,
 			Threshold: cfg.Checks.PostfixTLSPo.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.NewTCP("tlspol-8642", at(svcPostfixTLSPol), 8642, probe.TCPOptions{}),
 			},
@@ -210,7 +257,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "dovecot", Service: "Dovecot", Event: svcDovecot,
 			Threshold: cfg.Checks.Dovecot.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				// The LMTP probe expects a rejection: only a working user
 				// lookup can answer "User doesn't exist".
@@ -233,7 +280,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "dovecot-repl", Service: "Dovecot replication", Event: "dovecot_repl_checks",
 			Threshold: cfg.Checks.DovecotRepl.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Minute,
+			Interval:  window.Standard, DeadDelay: time.Minute,
 			Probes: []probe.Probe{
 				probe.Cost(1, probe.NewRedisFlag("repl-health", deps.Store, "DOVECOT_REPL_HEALTH", "1")),
 			},
@@ -241,7 +288,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "rspamd", Service: "Rspamd", Event: svcRspamd,
 			Threshold: cfg.Checks.Rspamd.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.Cost(1, probe.NewRspamd("settings", rspamdSocket)),
 				probe.Cost(1, probe.NewMilter("milter", at(svcRspamd), 9900, probe.DefaultTimeout)),
@@ -250,20 +297,21 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "ratelimit", Service: "Ratelimit", Event: "ratelimit",
 			Threshold: cfg.Checks.Ratelimit.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 		},
 		{
 			Name: "fail2ban", Service: "Fail2ban", Event: "fail2ban",
 			Threshold: cfg.Checks.Fail2ban.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 		},
 		{
 			// The certificate threshold was hard-coded in the shell, and the
-			// check always slept five minutes because its notifications are
-			// throttled to one a day anyway.
+			// check slept a flat five minutes because its notifications are
+			// throttled to one a day anyway. WATCHDOG_CHECK_INTERVAL can only
+			// stretch that, never shorten it.
 			Name: "cert", Service: "Primary certificate expiry check", Event: "certcheck",
 			Threshold: config.CertThreshold,
-			Interval:  certInterval, DeadDelay: 5 * time.Minute,
+			Interval:  window.Cert, DeadDelay: 5 * time.Minute,
 			Probes: []probe.Probe{
 				// watchdog.sh asked for "postfix" and "dovecot" here. Those are
 				// not the compose service names, so under IP_BY_DOCKER_API the
@@ -283,7 +331,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "olefy", Service: "Olefy", Event: svcOlefy,
 			Threshold: cfg.Checks.Olefy.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.NewTCP("olefy-10055", at(svcOlefy), 10055, probe.TCPOptions{Send: "PING\n"}),
 			},
@@ -291,7 +339,7 @@ func Build(deps Deps) ([]*Check, error) {
 		{
 			Name: "acme", Service: "ACME", Event: "acme-mailcow",
 			Threshold: cfg.Checks.ACME.Threshold,
-			Interval:  standardInterval, DeadDelay: time.Second,
+			Interval:  window.Standard, DeadDelay: time.Second,
 			Probes: []probe.Probe{
 				probe.Cost(1, probe.NewRedisChange("fail-time", deps.Store, "ACME_FAIL_TIME")),
 			},

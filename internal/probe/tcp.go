@@ -96,7 +96,17 @@ func (p *TCP) Run(ctx context.Context) Result {
 		_, _ = io.WriteString(conn, p.opts.Quit)
 	}
 
-	return OK("%s: %s:%d responded as expected", p.name, host, p.port)
+	// Without an Expect nothing was read back, and saying "responded as
+	// expected" claims a reply that was never asked for. watchdog.sh ran
+	// `check_tcp` without `-e` for php-fpm, postfix-tlspol and olefy, so the
+	// check really is only "the port accepts a connection" — but Nagios said so,
+	// reporting a connection time rather than a response. A wedged worker that
+	// accepts and then falls silent passes all three, and the log has to be
+	// honest about how little that proves.
+	if p.opts.Expect == "" {
+		return OK("%s: %s:%d accepted a connection, nothing was read back", p.name, host, p.port)
+	}
+	return OK("%s: %s:%d answered with %q as expected", p.name, host, p.port, p.opts.Expect)
 }
 
 // connect dials and, when configured, completes the TLS handshake.

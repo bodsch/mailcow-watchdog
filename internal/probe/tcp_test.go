@@ -104,6 +104,58 @@ func TestTCPUnresolvableTargetIsUnknown(t *testing.T) {
 	}
 }
 
+// TestTCPWithoutExpectDoesNotClaimAReply is about what the log tells an operator.
+//
+// php-fpm, postfix-tlspol and olefy are probed with `check_tcp` and no expected
+// string, exactly as watchdog.sh did, so a wedged worker that accepts the
+// connection and then falls silent passes. That is the inherited behaviour and it
+// stays. What must not stay is the verdict claiming the service "responded as
+// expected", because the probe never read a byte: an operator chasing an outage
+// reads that line as proof the service answered and looks elsewhere.
+func TestTCPWithoutExpectDoesNotClaimAReply(t *testing.T) {
+	host, port := deadServer(t)
+
+	res := runProbe(t, NewTCP("fpm-9001", Static(host), port, TCPOptions{}))
+	if res.Status != health.StatusOK {
+		t.Fatalf("status = %v (%s), want OK — an open port is what check_tcp reports", res.Status, res.Message)
+	}
+	if strings.Contains(res.Message, "responded") || strings.Contains(res.Message, "answered") {
+		t.Errorf("message = %q claims a reply from a server that never sent one", res.Message)
+	}
+	if !strings.Contains(res.Message, "nothing was read back") {
+		t.Errorf("message = %q, want it to say that nothing was read", res.Message)
+	}
+}
+
+// Sending without expecting is the olefy case: the probe writes "PING\n" and
+// reads nothing at all. The verdict must not turn the write into a reply.
+func TestTCPSendWithoutExpectDoesNotClaimAReply(t *testing.T) {
+	host, port := deadServer(t)
+
+	res := runProbe(t, NewTCP("olefy-10055", Static(host), port, TCPOptions{Send: "PING\n"}))
+	if res.Status != health.StatusOK {
+		t.Fatalf("status = %v (%s), want OK", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "nothing was read back") {
+		t.Errorf("message = %q, want it to say that nothing was read", res.Message)
+	}
+}
+
+// With an Expect the probe really did read a reply, and the verdict names it —
+// otherwise the two cases are indistinguishable in the log, which is the whole
+// point of the distinction.
+func TestTCPWithExpectNamesWhatItRead(t *testing.T) {
+	host, port := bannerServer(t, "VERSION 1.0\r\n")
+
+	res := runProbe(t, NewTCP("replication-10001", Static(host), port, TCPOptions{Expect: "VERSION"}))
+	if res.Status != health.StatusOK {
+		t.Fatalf("status = %v (%s), want OK", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "VERSION") {
+		t.Errorf("message = %q, want it to name what was expected and found", res.Message)
+	}
+}
+
 // The milter probe exists because rspamd's proxy worker has no ping: a wedged
 // worker accepts the connection and then says nothing.
 func TestMilterWedgedWorkerIsCritical(t *testing.T) {

@@ -156,13 +156,22 @@ func (p *Ratelimit) Run(ctx context.Context) Result {
 		return Unknown("%s: cannot read RL_LOG: %v", p.name, err)
 	}
 
-	current := ""
-	if len(head) > 0 {
-		current = queueID(head[0])
-	}
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// An empty list cannot hold a rate limit that was just applied. The shell
+	// compared the two strings and alerted on any difference, so a Redis that
+	// restarted without persistence, or a list deleted from the UI's debug page,
+	// produced "a new rate limit was applied (queue id )" — an alert with no
+	// identifier in it and, because Details reads the same empty list, no body
+	// either. See DEVIATIONS.md.
+	if len(head) == 0 {
+		p.seeded = true
+		p.lastID = ""
+		return OK("%s: no rate limits recorded", p.name)
+	}
+
+	current := queueID(head[0])
 
 	if !p.seeded {
 		p.seeded = true
@@ -197,14 +206,21 @@ func (p *Ratelimit) Details(ctx context.Context) string {
 	return b.String()
 }
 
-// queueID extracts the .qid field the shell pulled out with jq. A record that
-// does not parse yields an empty id, which simply reads as "unchanged".
+// queueID extracts the .qid field the shell pulled out with jq.
+//
+// A record that does not parse falls back to the record itself, which is what
+// makes "unchanged" mean unchanged. Returning an empty id instead — as this did,
+// and as `jq .qid` did on malformed input — made the same unreadable entry read
+// as a change on the round it appeared and as unchanged ever after, so the check
+// alerted once, with an empty queue id, about nothing that happened. The
+// fallback keeps a genuinely new unreadable entry detectable, which an id of ""
+// would have swallowed.
 func queueID(record string) string {
 	var parsed struct {
 		QID string `json:"qid"`
 	}
 	if err := json.Unmarshal([]byte(record), &parsed); err != nil {
-		return ""
+		return strings.TrimSpace(record)
 	}
 	return parsed.QID
 }

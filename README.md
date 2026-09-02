@@ -85,10 +85,28 @@ Every variable from the original is honoured. Additions:
 | `LOG_LEVEL` | `info` (`debug` under `DEV_MODE`) | `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `json` (`text` under `DEV_MODE`) | `json` or `text` |
 | `WATCHDOG_SETTLE_DELAY` | `30s` | Grace period before the first probe |
+| `WATCHDOG_CHECK_INTERVAL` | `20s` | Shortest pause between two rounds of the same check |
 | `DBSOCKET` | `/var/run/mysqld/mysqld.sock` | Shared MariaDB socket |
 | `MAILQ_SPOOL_DIR` | `/var/spool/postfix/deferred` | Deferred queue mount |
 | `DOCKER_API_URL` | derived from `COMPOSE_PROJECT_NAME` | `https://…` or `unix:///var/run/docker.sock` |
 | `DOCKER_API_DIALECT` | `auto` | `auto`, `mailcow` or `engine` |
+
+`WATCHDOG_CHECK_INTERVAL` is how the watchdog is asked to be calmer than the
+original, whose sleeps were hard-coded in the script. It sets the lower bound of
+every check's sleep window; the jitter above it stays the size watchdog.sh used
+(up to 59s, up to 119s for clamd), because its job is to keep nineteen checks
+from hitting the stack in lockstep, not to widen with the interval.
+
+At the default the cadence is exactly the shell's: rounds every 20–79 seconds.
+At `5m` they are 5m–5m59s. The certificate check (a flat 5m) and the external
+checks (30m) keep their own longer sleeps until the configured bound overtakes
+them, and then follow it.
+
+Raising it raises the time to notice an outage by the same amount: a container is
+restarted once `Threshold` error points have accumulated, and those are earned
+one round at a time. `0` and negative values are refused at startup — either
+would make every sleep return at once and turn the checks into a load generator
+against the stack they measure.
 
 `WATCHDOG_METRICS_LISTEN` is an address to **bind**, not a URL to scrape: `":9393"`, or
 `"127.0.0.1:9393"` to keep it off the network. A URL such as

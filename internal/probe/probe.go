@@ -11,6 +11,7 @@ package probe
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"time"
@@ -171,25 +172,50 @@ func certExpiry(state tls.ConnectionState, minDays int, label string) Result {
 	}
 	leaf := state.PeerCertificates[0]
 	now := time.Now()
+	who := describe(leaf)
 
 	if now.Before(leaf.NotBefore) {
-		return Critical("%s: certificate is not valid before %s",
-			label, leaf.NotBefore.Format(time.RFC3339))
+		return Critical("%s: certificate is not valid before %s, %s",
+			label, leaf.NotBefore.Format(time.RFC3339), who)
 	}
 
 	left := leaf.NotAfter.Sub(now)
 	days := int(left.Hours() / 24)
 	switch {
 	case left <= 0:
-		return Critical("%s: certificate expired on %s",
-			label, leaf.NotAfter.Format(time.RFC3339))
+		return Critical("%s: certificate expired on %s, %s",
+			label, leaf.NotAfter.Format(time.RFC3339), who)
 	case days < minDays:
-		return Critical("%s: certificate expires in %d days (%s), minimum is %d",
-			label, days, leaf.NotAfter.Format(time.RFC3339), minDays)
+		return Critical("%s: certificate expires in %d days (%s), minimum is %d, %s",
+			label, days, leaf.NotAfter.Format(time.RFC3339), minDays, who)
 	default:
-		return OK("%s: certificate valid for %d more days (until %s)",
-			label, days, leaf.NotAfter.Format(time.RFC3339))
+		return OK("%s: certificate valid for %d more days (until %s), %s",
+			label, days, leaf.NotAfter.Format(time.RFC3339), who)
 	}
+}
+
+// describe names the certificate a verdict is about.
+//
+// A verdict without it says only that something expired, which is the one thing
+// the operator already suspected, and it leaves the more likely explanation
+// unexamined: that the probe is looking at a different certificate than the one
+// that was just renewed. Naming the subject settles that from the log alone.
+//
+// The case this was written for is a stack still serving the example pair
+// mailcow ships. "certificate expired on 2019-11-28" reads as a broken probe
+// until the subject shows CN=mail.example.org signed by nobody, at which point
+// it is plainly a certificate that ACME never replaced.
+//
+// Self-signed is decided by comparing the two names rather than by verifying the
+// signature: the probes cannot build a chain anyway (they connect by container
+// name to certificates issued for the public hostname), and a certificate that
+// names itself as its own issuer is the thing worth pointing out.
+func describe(leaf *x509.Certificate) string {
+	subject := leaf.Subject.String()
+	if issuer := leaf.Issuer.String(); issuer != subject {
+		return fmt.Sprintf("subject %q, issuer %q", subject, issuer)
+	}
+	return fmt.Sprintf("subject %q, self-signed", subject)
 }
 
 // resolve turns an Addr into a host, converting a failure into the UNKNOWN

@@ -91,6 +91,33 @@ A check with threshold zero declared its service dead before the first probe.
 
 **Now:** Rejected at startup.
 
+### 1.11 A cleared `RL_LOG` raised an alert nobody could act on
+
+`ratelimit_checks` compared `jq .qid` of the newest `RL_LOG` entry against the
+previous round's and alerted on any difference. An empty list yields an empty
+string, so a Redis that restarted without persistence — or a list deleted from the
+UI's debug page — differed from whatever preceded it and produced:
+
+```
+Ratelimit: a new rate limit was applied (queue id )
+```
+
+No identifier in it, and no body either: the details are read from the same empty
+list. The port inherited this, comment included — `queueID` claimed an unparsable
+record "simply reads as unchanged", which was the opposite of what it did. An
+unreadable entry produced the same empty id, so it alerted once about nothing and
+then never again about the same entry.
+
+**Now:** an empty list is reported as "no rate limits recorded", and an entry that
+does not parse is identified by the record itself rather than by an empty string.
+The same unreadable entry twice is unchanged, which is what the comment promised;
+a *different* unreadable entry is still a change, so nothing that really happened
+is swallowed. Covered by `TestRatelimitSurvivesAClearedLog`,
+`TestRatelimitDoesNotAlertOnAnUnreadableEntryTwice` and
+`TestQueueIDIdentifiesARecordItCannotParse`.
+
+---
+
 ## 2. Intentional behaviour changes
 
 ### 2.1 `F2B_RES` is no longer written
@@ -114,6 +141,50 @@ verification applies as to a request. Nothing is logged on the server side, and 
 answer is the more useful one: a listener that accepts but cannot serve TLS is
 reported as unreachable rather than as an endpoint the supervisor resumes every
 check for. Over plain HTTP there is no handshake and the probe stays a connection.
+
+### 2.3 A certificate verdict names the certificate
+
+`check_smtp -D 7` and `check_imap -D 7` reported only the dates, so the message
+was "certificate expired on <date>" and nothing more.
+
+That reads as a broken probe. The case it comes from is a stack still serving the
+example pair mailcow ships, whose `notAfter` is `Nov 28 10:11:00 2019 GMT`: the
+verdict is correct, the mail server really is presenting a certificate that
+expired in 2019, but a log line naming a date seven years in the past next to a
+successful ACME renewal points the operator at the watchdog rather than at the
+deployment.
+
+**Now:** every certificate verdict carries the subject and the issuer
+(`internal/probe.describe`), and a certificate that names itself as its own
+issuer is called self-signed instead. For the case above the line reads:
+
+```
+dovecot-cert: dovecot-mailcow:993: certificate expired on 2019-11-28T10:11:00Z,
+subject "CN=mail.example.org,O=mailcow", issuer "O=mailcow"
+```
+
+which answers from the log alone which certificate the probe looked at. The test
+uses that certificate itself as its fixture rather than one shaped like it: a
+generated stand-in came out strictly self-signed, while mailcow's is signed by a
+separate `O=mailcow` issuer, and testing against the friendlier shape would have
+pinned a message the field never produces.
+
+### 2.4 A TCP probe no longer claims a reply it never read
+
+php-fpm (9001, 9002), postfix-tlspol (8642) and olefy (10055) are probed with
+`check_tcp` and no expected string, exactly as watchdog.sh did — olefy is even
+sent a `PING\n` whose answer nobody reads. The check is therefore "the port
+accepts a connection", and a wedged worker that accepts and then falls silent
+passes it. That behaviour is inherited deliberately.
+
+The verdict was not. All four reported `responded as expected`, which claims a
+reply the probe never asked for; Nagios reported a connection time instead and
+claimed nothing. An operator chasing an outage reads "responded as expected" as
+proof the service answered and looks elsewhere.
+
+**Now:** without an expected string the verdict is `accepted a connection, nothing
+was read back`, and with one it names what it found. The two cases are
+distinguishable in the log, which is the point.
 
 ## 3. Deliberately preserved quirks
 
@@ -143,7 +214,48 @@ These look accidental but stay as they are, because the deployment builds on the
 - **`USE_WATCHDOG=n` makes the process idle rather than exit**, so compose does not
   see a crash loop.
 
-## 4. Technical differences with no effect on the interface
+## 4. Additions
+
+### 4.1 `WATCHDOG_CHECK_INTERVAL`
+
+The sleep windows were hard-coded: `sleep $(( ( RANDOM % 60 ) + 20 ))` for
+seventeen checks, `RANDOM % 120 + 20` for clamd, `sleep 300` for the certificate
+check and half an hour for the external ones. Nineteen checks therefore probed a
+mailcow every twenty to seventy-nine seconds whether or not that was wanted, and
+the only way to calm it down was to edit the script inside the image.
+
+`WATCHDOG_CHECK_INTERVAL` (a duration, default `20s` — the shell's own lower
+bound) is the shortest pause between two rounds of the same check.
+`check.Intervals` derives the four windows from it:
+
+| Window | Default | At `WATCHDOG_CHECK_INTERVAL=5m` |
+|---|---|---|
+| standard (17 checks) | 20–79s | 5m–5m59s |
+| clamd | 20–139s | 5m–6m59s |
+| external | 30m–30m19s | 30m–30m19s |
+| cert | 5m | 5m |
+
+Two decisions are worth recording. The jitter keeps the size the shell gave it
+instead of scaling with the interval: its job is to stop nineteen checks from
+hitting the stack in lockstep, and a minute of spread does that as well at
+five-minute rounds as at twenty-second ones. Scaling it would make
+`WATCHDOG_CHECK_INTERVAL=5m` mean "somewhere between five and twenty minutes",
+which is a different request. And the two long checks are raised to the
+configured bound but never lowered below their own, so asking for hourly rounds
+does not leave the certificate probe running every five minutes, while asking for
+faster rounds does not send the external checks out over the public network every
+twenty seconds.
+
+Zero and negative values are refused at startup. Either would make every sleep
+return immediately, and nineteen checks in a tight loop would hammer the very
+stack they measure — a watchdog that reads as configured and behaves like a load
+generator.
+
+Raising it raises the time to notice an outage by the same amount. A container
+that stops answering is restarted after `Threshold` points have accumulated, and
+those points are earned one round at a time.
+
+## 5. Technical differences with no effect on the interface
 
 Three shell constructs disappear:
 

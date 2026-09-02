@@ -315,7 +315,9 @@ func (c *Client) IP(ctx context.Context, service string) (string, error) {
 		return "", fmt.Errorf("no container runs the service %q in project %q", service, c.project)
 	}
 
-	rand.Shuffle(len(matched), func(i, j int) { matched[i], matched[j] = matched[j], matched[i] })
+	// G404: the shuffle spreads probes across the replicas of one service, the
+	// same job bash's $RANDOM had. Nothing here is a secret or a token.
+	rand.Shuffle(len(matched), func(i, j int) { matched[i], matched[j] = matched[j], matched[i] }) //nolint:gosec
 
 	for _, container := range matched {
 		if ip := c.pickAddress(container); ip != "" {

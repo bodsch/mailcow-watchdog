@@ -30,7 +30,10 @@ func Load(look Lookup) (*Config, error) {
 		Enabled:     !isNo(e.str("USE_WATCHDOG", "y")),
 		Verbose:     isYes(e.str("WATCHDOG_VERBOSE", "n")),
 		SettleDelay: e.duration("WATCHDOG_SETTLE_DELAY", 30*time.Second),
-		MailqDir:    e.str("MAILQ_SPOOL_DIR", mailqSpoolDir),
+		// The lower bound of the shell's own sleep window, so an unset variable
+		// keeps the cadence watchdog.sh had.
+		CheckInterval: e.duration("WATCHDOG_CHECK_INTERVAL", DefaultCheckInterval),
+		MailqDir:      e.str("MAILQ_SPOOL_DIR", mailqSpoolDir),
 
 		Mailcow: Mailcow{
 			Hostname:       e.str("MAILCOW_HOSTNAME", ""),

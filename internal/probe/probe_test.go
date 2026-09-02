@@ -20,11 +20,17 @@ type stubProbe struct {
 	name string
 	res  Result
 	fn   func() Result
+	// observe, when set, is handed the context Run built, so a test can assert
+	// what the probes are actually given.
+	observe func(context.Context)
 }
 
 func (p *stubProbe) Name() string { return p.name }
 
-func (p *stubProbe) Run(context.Context) Result {
+func (p *stubProbe) Run(ctx context.Context) Result {
+	if p.observe != nil {
+		p.observe(ctx)
+	}
 	if p.fn != nil {
 		return p.fn()
 	}

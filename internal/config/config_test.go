@@ -337,6 +337,25 @@ func TestValidationErrors(t *testing.T) {
 			overrides: map[string]string{"WATCHDOG_SETTLE_DELAY": "half a minute"},
 			want:      "WATCHDOG_SETTLE_DELAY",
 		},
+		{
+			name:      "unparsable check interval",
+			overrides: map[string]string{"WATCHDOG_CHECK_INTERVAL": "5 minutes"},
+			want:      "WATCHDOG_CHECK_INTERVAL",
+		},
+		// Zero and negative are refused rather than clamped: either would make
+		// every sleep return at once and turn nineteen checks into a tight loop
+		// against the stack they are supposed to be measuring. Starting is the
+		// only moment this can be said out loud.
+		{
+			name:      "zero check interval",
+			overrides: map[string]string{"WATCHDOG_CHECK_INTERVAL": "0s"},
+			want:      "WATCHDOG_CHECK_INTERVAL must be positive",
+		},
+		{
+			name:      "negative check interval",
+			overrides: map[string]string{"WATCHDOG_CHECK_INTERVAL": "-30s"},
+			want:      "WATCHDOG_CHECK_INTERVAL must be positive",
+		},
 		// The variable holds an address to bind, and the name reads like it wants
 		// the URL a scrape would use.
 		{

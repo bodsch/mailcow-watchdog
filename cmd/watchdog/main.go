@@ -72,7 +72,11 @@ func run() error {
 		"hostname", cfg.Mailcow.Hostname,
 		"project", cfg.Mailcow.ComposeProject,
 		"log_level", cfg.Log.Level,
-		"verbose", cfg.Verbose)
+		"verbose", cfg.Verbose,
+		// A raised interval changes how long every outage takes to be noticed,
+		// so it belongs in the line an operator reads when they wonder why the
+		// watchdog was slow to react.
+		"check_interval", cfg.CheckInterval)
 
 	// Signals arrive here rather than in a goroutine so every stage of startup
 	// can be interrupted cleanly.
